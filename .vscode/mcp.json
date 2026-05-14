@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"my-mcp-server-9d1c9b22": {
+			"url": "https://org744e75ab.crm.dynamics.com/api/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}
