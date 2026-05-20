@@ -76,10 +76,11 @@ runsRouter.post('/:id/versions/:versionId/approve', (req, res) => {
     res.status(409).json({ error: 'Version already approved' });
     return;
   }
+  const { approvedBy } = (req.body ?? {}) as { approvedBy?: string };
   version.approval = {
     versionId: version.id,
     approvedAt: new Date().toISOString(),
-    approvedBy: 'Migration Lead',
+    approvedBy: approvedBy?.trim() || 'unknown',
   };
   run.status = 'approved';
   run.updatedAt = new Date().toISOString();

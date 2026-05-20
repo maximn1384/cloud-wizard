@@ -5,7 +5,7 @@ import { HomePage } from './components/wizard/HomePage';
 import { ConnectStep } from './components/wizard/ConnectStep';
 import { UploadStep } from './components/wizard/UploadStep';
 import { AnalyzeStep } from './components/wizard/AnalyzeStep';
-import { ReviewStep } from './components/wizard/ReviewStep';
+import { SolutionDesignStep } from './components/wizard/SolutionDesignStep';
 import { ApproveStep } from './components/wizard/ApproveStep';
 import { GenerateStep } from './components/wizard/GenerateStep';
 import { LogsStep } from './components/wizard/LogsStep';
@@ -20,7 +20,7 @@ function App() {
             <Route path="runs/:runId/connect" element={<ConnectStep />} />
             <Route path="runs/:runId/upload" element={<UploadStep />} />
             <Route path="runs/:runId/analyze" element={<AnalyzeStep />} />
-            <Route path="runs/:runId/review" element={<ReviewStep />} />
+            <Route path="runs/:runId/design" element={<SolutionDesignStep />} />
             <Route path="runs/:runId/approve" element={<ApproveStep />} />
             <Route path="runs/:runId/generate" element={<GenerateStep />} />
             <Route path="runs/:runId/logs" element={<LogsStep />} />

@@ -67,11 +67,18 @@ export const api = {
       body: JSON.stringify({ feedback }),
     }),
 
+  // Solution Design
+  design: (runId: string, guidance?: string) =>
+    request<import('../types/run').RunVersion>(`/ai/design/${runId}`, {
+      method: 'POST',
+      body: JSON.stringify({ guidance }),
+    }),
+
   // Approval
-  approve: (runId: string, versionId: string) =>
+  approve: (runId: string, versionId: string, approvedBy?: string) =>
     request<import('../types/run').Approval>(
       `/runs/${runId}/versions/${versionId}/approve`,
-      { method: 'POST' }
+      { method: 'POST', body: JSON.stringify({ approvedBy }) }
     ),
 
   // Generation

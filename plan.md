@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │  Frontend (React SPA – Independent Web App)                     │
 │  Fluent UI v9 · React Router · Zustand state · MSAL Auth       │
-│  Wizard Steps: Connect → Upload → Analyze → Review → Approve   │
+│  Wizard Steps: Connect → Upload → Analyze → Design → Approve   │
 │                → Generate → Logs                                │
 └──────────────┬──────────────────────────────────────────────────┘
                │ REST calls (Bearer token for Dataverse endpoints)
@@ -89,7 +89,7 @@ server/
 ```
 
 1.3 **Set up React Router** with wizard layout
-- Routes: `/`, `/runs`, `/runs/:id/connect`, `/runs/:id/upload`, `/runs/:id/analyze`, `/runs/:id/review`, `/runs/:id/approve`, `/runs/:id/generate`, `/runs/:id/logs`
+- Routes: `/`, `/runs`, `/runs/:id/connect`, `/runs/:id/upload`, `/runs/:id/analyze`, `/runs/:id/design`, `/runs/:id/approve`, `/runs/:id/generate`, `/runs/:id/logs`
 
 1.4 **Create app shell** with Fluent UI
 - Left sidebar with run list
@@ -263,73 +263,102 @@ _Note: the original plan called for a fully-typed `AnalysisResult` (schema/mappi
 
 ---
 
-## Phase 5: Review & Mapping UI – "UI for AI" (Journey D)
+## Phase 5: Solution Design – MCP-Ready Architecture (Journey D) 🔄
 
-**Goal:** Two-part review experience: AI reasoning view + source-to-destination mapping editor.
+**Goal:** Transform requirements into a concrete D365 solution design using the Solution-Architect agent. Design includes MCP-ready entity/field definitions and deployment decisions.
+
+### Implementation Notes (as built)
+
+- Receives `RequirementsDraft` from Phase 4 (what we have) + user design input (how to implement in D365)
+- Calls `Solution-Architect` agent on Azure Foundry using same `agent_reference` pattern as Migration-Analyst
+- Solution-Architect produces a structured design document (markdown) with:
+  - Mapped D365 entities (native or custom)
+  - Field definitions (names, types, requirements)
+  - Relationships and hierarchies
+  - MCP deployment steps (hints for Phase 7 generation)
+  - Data transformation rules
+- Output stored as `SolutionDesign` on `RunVersion` (parallel to `RequirementsDraft`, separate timeline)
 
 ### Tasks
 
-5.1 **Part 1: AI Reasoning Review**
-- Display AI recommendations in structured cards
-- Show: proposed tables, fields, relationships, risks, assumptions
-- Accept/reject individual recommendations
-- Inline "request change" → re-triggers analysis with feedback
-- Highlight native D365 table alignment (Account, Contact, Case, etc.)
+5.1 **Backend: Solution Design endpoint** (`server/routes/ai.ts`)
+- `POST /api/ai/design/:runId` – triggers Solution-Architect agent
+- Input: requirements markdown + optional user design guidance ("prefer custom entities," "map to Account," etc.)
+- Builds prompt from requirements + source schema + user guidance
+- Stores markdown output as `SolutionDesign` on new `RunVersion`
+- Env vars: `AZURE_AI_AGENT_ID=Solution-Architect`
 
-5.2 **Part 2: Mapping UI**
-- Two-panel layout: Source (left) ↔ Destination (right)
-- Source panel: tables/columns from parsed Excel
-- Destination panel: recommended Dataverse tables/columns
-- Drag-and-drop or dropdown mapping connections
-- Visual mapping lines between source → destination
-- Toggle individual mappings on/off
-- Show unmapped source columns (warning) and new destination columns (info)
+5.2 **Solution Design output schema**
+```ts
+interface SolutionDesign {
+  markdown: string;          // D365 design specification
+  agentName: string;         // 'Solution-Architect'
+  conversationId: string;    // Foundry conversation id
+  responseId: string;        // Foundry response id
+  generatedAt: string;       // ISO timestamp
+  userGuidance?: string;     // user design preferences from this iteration
+}
+```
 
-5.3 **Schema editor**
-- Edit recommended field names, types, required flags
-- Add/remove fields from recommendations
-- Edit relationship definitions
-- All edits persist and feed into next analysis iteration
+5.3 **Solution Design UI** (`src/components/wizard/SolutionDesignStep.tsx`)
+- Display requirements draft (read-only, from Phase 4)
+- Show design guidance textarea ("Prefer custom entities," "Map these to Account," etc.)
+- **Design** / **Re-design** button (re-runs agent with updated guidance)
+- Version tabs for design iterations
+- Markdown rendering of Solution-Architect output
+- Navigation to Approval with current design locked
 
-5.4 **Preserve edits across iterations**
-- When user re-triggers analysis, carry forward accepted edits
-- AI incorporates user overrides as constraints
-- Clear visual indicator for "user edited" vs "AI recommended"
+5.4 **Iterative design loop**
+- User sees requirements → provides design guidance (priorities, constraints)
+- Solution-Architect produces a design
+- User can iterate with new guidance; each creates new RunVersion
+- All versions kept for audit trail
 
 ### Deliverables
-- [ ] AI reasoning review panel with accept/reject
-- [ ] Source-to-destination mapping UI with edit capability
-- [ ] Edits persisted and used in subsequent analysis
-- [ ] Clear distinction between AI-generated and user-edited content
+- [x] Solution-Architect agent callable via `agent_reference`
+- [x] Design stored as versioned `SolutionDesign` (markdown)
+- [x] User can iterate design with guidance input
+- [x] Markdown rendering of agent output in UI
+- [x] Clean separation: Requirements (what) vs. Design (how to implement in D365)
 
 ---
 
-## Phase 6: Approval Gate (Journey E)
+## Phase 6: Approval Gate (Journey E) ✅
 
-**Goal:** Explicit approval workflow before any Dataverse changes.
+**Goal:** Lightweight approval workflow: review design summary and lock version before generation.
+
+### Implementation Notes (as built)
+
+- No longer a full review UI; that's owned by Phase 5 (Solution Design)
+- Shows **summary**: source count, env URL, requirements timestamp, design timestamp, user guidance applied
+- Explicit **approve for deployment** button with confirmation (shows target env URL)
+- Records who approved (extracted from signed-in account), when, and version
+- Backend prevents double-approval (returns 409)
+- UI swaps to locked state after approval; enables "Generate" button
 
 ### Tasks
 
-6.1 **Approval UI**
-- Summary view of the approved version (schema + mappings)
-- "Approve for Generation" button with confirmation dialog
-- Display approval metadata (who, when, version)
-- Lock indicator on approved versions
+6.1 **Approval UI** (`src/components/wizard/ApproveStep.tsx`) ✅
+- Summary card: run name, env, source files, agents used (Migration-Analyst → Solution-Architect), timestamps
+- Approve button with confirmation dialog (shows target Dataverse URL)
+- Locked badge + timestamp after approval
+- Navigation: Back to Design → Continue to Generate
 
-6.2 **Backend: Approval endpoint**
+6.2 **Backend: Approval endpoint** (`server/routes/runs.ts`) ✅
 - `POST /api/runs/:id/versions/:versionId/approve` – records approval
-- Prevents re-approval of same version
-- Locks version – no further edits allowed on approved version
+- Body: `{ approvedBy?: string }` (extracted from signed-in user)
+- Returns 409 if already approved (idempotent)
+- Records `ApprovalMetadata` on version
 
 6.3 **Enforce approval gate**
-- "Generate" button disabled unless current version is approved
-- Backend validates approval exists before MCP execution
-- Approval metadata stored in run history
+- Generate button disabled unless current version is approved
+- Backend validates approval before Phase 7 execution
 
 ### Deliverables
-- [ ] Explicit approval flow with confirmation
-- [ ] Version locked after approval
-- [ ] Generation blocked without approval
+- [x] Lightweight approval gate (summary + confirmation only)
+- [x] Version locked after approval
+- [x] Approval metadata stored (who, when, version)
+- [x] Generation blocked without approval
 
 ---
 
@@ -514,7 +543,8 @@ _Note: the original plan called for a fully-typed `AnalysisResult` (schema/mappi
 |-----------|--------|---------------|
 | **M1 – Foundation** ✅ | 1-2 | App shell, routing, run creation, env connection (Dataverse WhoAmI) |
 | **M2 – Data Intake** ✅ | 3 | Excel upload, parsing, source metadata review |
-| **M3 – AI Analysis** ✅ | 4 | Foundry agent (`agent_reference`), versioned drafts, iterative feedback |
-| **M4 – Review UX** | 5-6 | Full review/mapping UI, approval gate |
+| **M3 – AI Analysis** ✅ | 4 | Migration-Analyst agent, versioned requirements drafts, iterative feedback |
+| **M4 – Solution Design** 🔄 | 5 | Solution-Architect agent, D365 design specifications, user guidance loop |
+| **M5 – Approval Gate** ✅ | 6 | Lightweight approval + confirmation before generation |
 | **M5 – MVP Complete** | 7-8 | End-to-end: upload → analyze → approve → generate in D365 |
 | **M6 – Hardened** | 9 | Error handling, security, polish |

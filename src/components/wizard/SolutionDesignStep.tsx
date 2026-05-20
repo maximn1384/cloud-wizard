@@ -10,13 +10,15 @@ import {
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
+  Textarea,
+  Spinner,
   Tab,
   TabList,
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
 import {
-  DocumentSearch20Regular,
+  FlowElement20Regular,
   ArrowRight20Regular,
   ArrowLeft20Regular,
   History20Regular,
@@ -26,6 +28,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useRunStore } from '../../stores/runStore';
 import { useUiStore } from '../../stores/uiStore';
+import { api } from '../../services/api';
 
 const useStyles = makeStyles({
   root: {
@@ -48,9 +51,18 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
     borderRadius: tokens.borderRadiusMedium,
   },
-  draftCard: {
+  card: {
     padding: '20px',
-    minHeight: '300px',
+    minHeight: '200px',
+  },
+  guidanceSection: {
+    padding: '16px',
+    backgroundColor: tokens.colorNeutralBackground2,
+    borderRadius: tokens.borderRadiusMedium,
+    borderLeft: `3px solid ${tokens.colorBrandStroke1}`,
+  },
+  guidanceTextarea: {
+    marginTop: '8px',
   },
   markdown: {
     '& h1': { fontSize: '1.5rem', fontWeight: 600, marginTop: '1em' },
@@ -94,26 +106,37 @@ const useStyles = makeStyles({
     justifyContent: 'space-between',
     marginTop: '8px',
   },
-  phase5Note: {
-    padding: '12px',
+  designButtonGroup: {
+    display: 'flex',
+    gap: '8px',
+    marginTop: '12px',
+  },
+  spinnerContainer: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '16px',
     backgroundColor: tokens.colorNeutralBackground2,
     borderRadius: tokens.borderRadiusMedium,
-    borderLeft: `3px solid ${tokens.colorBrandStroke1}`,
   },
 });
 
-export function ReviewStep() {
+export function SolutionDesignStep() {
   const styles = useStyles();
   const { runId } = useParams();
   const navigate = useNavigate();
   const setStep = useUiStore((s) => s.setStep);
 
   const run = useRunStore((s) => s.runs.find((r) => r.id === runId));
+  const updateRun = useRunStore((s) => s.updateRun);
 
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [guidance, setGuidance] = useState('');
+  const [isDesigning, setIsDesigning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setStep('review');
+    setStep('design');
   }, [setStep]);
 
   useEffect(() => {
@@ -125,26 +148,53 @@ export function ReviewStep() {
   const versions = run?.versions ?? [];
   const currentVersion =
     versions.find((v) => v.id === selectedVersionId) ?? versions[versions.length - 1];
-  const draft = currentVersion?.requirementsDraft;
+  const requirementsDraft = currentVersion?.requirementsDraft;
+  const solutionDesign = currentVersion?.solutionDesign;
+
+  const handleDesign = async () => {
+    if (!runId) return;
+    setIsDesigning(true);
+    setError(null);
+
+    try {
+      const version = await api.design(runId, guidance || undefined);
+      updateRun({ ...run!, versions: run!.versions.map((v) => (v.id === version.id ? version : v)), currentVersionId: version.id });
+      setGuidance('');
+      setSelectedVersionId(version.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Design failed';
+      setError(message);
+    } finally {
+      setIsDesigning(false);
+    }
+  };
 
   return (
     <div className={styles.root}>
       <div className={styles.header}>
-        <DocumentSearch20Regular />
-        <Title2>Review Recommendations</Title2>
+        <FlowElement20Regular />
+        <Title2>Solution Design</Title2>
       </div>
       <Text>
-        Review the AI-generated requirements draft for this run. Once Phase 5 is
-        complete this step will expose a structured editor and source-to-destination
-        mapping UI. For now you can read the latest draft and either go back to
-        re-analyze or continue to approval.
+        Transform the requirements into a concrete Dynamics 365 solution design. The
+        Solution-Architect agent will produce field definitions, entity mappings,
+        relationships, and MCP-ready deployment steps.
       </Text>
 
       {versions.length === 0 && (
         <MessageBar intent="warning">
           <MessageBarBody>
             <MessageBarTitle>No analysis yet</MessageBarTitle>
-            Run analysis on the previous step before reviewing.
+            Run analysis on the previous step before designing a solution.
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
+      {error && (
+        <MessageBar intent="error">
+          <MessageBarBody>
+            <MessageBarTitle>Design failed</MessageBarTitle>
+            {error}
           </MessageBarBody>
         </MessageBar>
       )}
@@ -172,42 +222,96 @@ export function ReviewStep() {
         </div>
       )}
 
-      {currentVersion && draft && (
-        <Card className={styles.draftCard}>
+      {requirementsDraft && (
+        <Card className={styles.card}>
           <CardHeader
             header={
               <Title3>
-                Requirements Draft —{' '}
+                Requirements Draft (Reference) —{' '}
                 <span style={{ color: tokens.colorNeutralForeground2 }}>
-                  {draft.agentName} ·{' '}
-                  {new Date(draft.generatedAt).toLocaleString()}
+                  {requirementsDraft.agentName}
+                </span>
+              </Title3>
+            }
+          />
+          <div
+            className={styles.markdown}
+            style={{
+              maxHeight: '300px',
+              overflowY: 'auto',
+              borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+              paddingTop: '12px',
+              marginTop: '8px',
+            }}
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {requirementsDraft.markdown}
+            </ReactMarkdown>
+          </div>
+        </Card>
+      )}
+
+      <div className={styles.guidanceSection}>
+        <Text weight="semibold">Design Guidance (optional)</Text>
+        <Text size={200} style={{ marginBottom: '8px', color: tokens.colorNeutralForeground2 }}>
+          Provide design preferences, priorities, or constraints for the Solution-Architect agent.
+          Examples: "Prefer custom entities," "Map to native Account table," "Prioritize workflow X"
+        </Text>
+        <Textarea
+          className={styles.guidanceTextarea}
+          value={guidance}
+          onChange={(_, data) => setGuidance(data.value)}
+          placeholder="Enter any design guidance here..."
+          disabled={isDesigning}
+          rows={4}
+        />
+      </div>
+
+      {isDesigning && (
+        <div className={styles.spinnerContainer}>
+          <Spinner size="small" />
+          <Text>Generating solution design...</Text>
+        </div>
+      )}
+
+      {solutionDesign && (
+        <Card className={styles.card}>
+          <CardHeader
+            header={
+              <Title3>
+                Solution Design —{' '}
+                <span style={{ color: tokens.colorNeutralForeground2 }}>
+                  {solutionDesign.agentName} ·{' '}
+                  {new Date(solutionDesign.generatedAt).toLocaleString()}
                 </span>
               </Title3>
             }
           />
           <div className={styles.markdown}>
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {draft.markdown}
+              {solutionDesign.markdown}
             </ReactMarkdown>
           </div>
         </Card>
       )}
 
-      {currentVersion && !draft && (
+      {!solutionDesign && !isDesigning && (
         <MessageBar intent="info">
           <MessageBarBody>
-            This version has no requirements draft attached. Re-run analysis on the
-            previous step.
+            <MessageBarTitle>No solution design yet</MessageBarTitle>
+            Click "Design Solution" below to generate a design based on the requirements.
           </MessageBarBody>
         </MessageBar>
       )}
 
-      <div className={styles.phase5Note}>
-        <Text size={200}>
-          <strong>Coming in Phase 5:</strong> structured accept/reject of individual
-          recommendations, source-to-destination mapping editor, schema editor, and
-          user-edited vs AI-recommended badges.
-        </Text>
+      <div className={styles.designButtonGroup}>
+        <Button
+          appearance="primary"
+          onClick={handleDesign}
+          disabled={isDesigning || !requirementsDraft}
+        >
+          {solutionDesign ? 'Re-design' : 'Design Solution'}
+        </Button>
       </div>
 
       <div className={styles.actions}>
@@ -222,7 +326,7 @@ export function ReviewStep() {
           icon={<ArrowRight20Regular />}
           iconPosition="after"
           onClick={() => navigate(`/runs/${runId}/approve`)}
-          disabled={!draft}
+          disabled={!solutionDesign}
         >
           Continue to Approve
         </Button>

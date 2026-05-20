@@ -4,7 +4,7 @@ export type WizardStep =
   | 'connect'
   | 'upload'
   | 'analyze'
-  | 'review'
+  | 'design'
   | 'approve'
   | 'generate'
   | 'logs';
@@ -13,7 +13,7 @@ const STEP_ORDER: WizardStep[] = [
   'connect',
   'upload',
   'analyze',
-  'review',
+  'design',
   'approve',
   'generate',
   'logs',

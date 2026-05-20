@@ -57,6 +57,37 @@ export function buildAnalystInput(sourceFiles: SourceFile[]): {
 }
 
 /**
+ * Call any Azure AI Foundry agent with a custom prompt.
+ * Returns the agent's response as text.
+ */
+export async function runFoundryAgent(
+  agentName: string,
+  userPrompt: string
+): Promise<{ outputText: string; conversationId: string; responseId: string }> {
+  const project = getProject();
+  const openai = project.getOpenAIClient();
+
+  // Create a conversation, then run the agent against it.
+  const conversation = await openai.conversations.create({
+    items: [{ type: 'message', role: 'user', content: userPrompt }],
+  });
+
+  // Pass agent_reference as an extra body field. The OpenAI SDK types don't
+  // know about Foundry's agent_reference, so we cast through `any`.
+  const response = await openai.responses.create({
+    conversation: conversation.id,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    agent_reference: { name: agentName, type: 'agent_reference' },
+  } as any);
+
+  return {
+    outputText: response.output_text ?? '',
+    conversationId: conversation.id,
+    responseId: response.id,
+  };
+}
+
+/**
  * Call the Migration-Analyst agent on Azure AI Foundry.
  * Returns the agent's structured response as markdown text.
  */
@@ -65,8 +96,6 @@ export async function runAnalystAgent(
   userFeedback?: string
 ): Promise<{ outputText: string; conversationId: string; responseId: string }> {
   const agentName = process.env.AZURE_AI_AGENT_ID ?? 'Migration-Analyst';
-  const project = getProject();
-  const openai = project.getOpenAIClient();
 
   const input = buildAnalystInput(sourceFiles);
 
@@ -89,22 +118,5 @@ export async function runAnalystAgent(
     '```',
   ].join('\n');
 
-  // Create a conversation, then run the agent against it.
-  const conversation = await openai.conversations.create({
-    items: [{ type: 'message', role: 'user', content: userPrompt }],
-  });
-
-  // Pass agent_reference as an extra body field. The OpenAI SDK types don't
-  // know about Foundry's agent_reference, so we cast through `any`.
-  const response = await openai.responses.create({
-    conversation: conversation.id,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    agent_reference: { name: agentName, type: 'agent_reference' },
-  } as any);
-
-  return {
-    outputText: response.output_text ?? '',
-    conversationId: conversation.id,
-    responseId: response.id,
-  };
+  return runFoundryAgent(agentName, userPrompt);
 }

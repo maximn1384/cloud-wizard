@@ -65,6 +65,7 @@ export interface RunVersion {
   createdAt: string;
   analysis: AnalysisResult | null;
   requirementsDraft: RequirementsDraft | null;
+  solutionDesign: SolutionDesign | null;
   userEdits: UserEdit[];
   approval: Approval | null;
   generationJob: Job | null;
@@ -81,6 +82,19 @@ export interface RequirementsDraft {
   responseId: string;
   generatedAt: string;
   userFeedback?: string;
+}
+
+/**
+ * Solution design produced by the Solution-Architect agent.
+ * Transforms requirements into D365-aligned schema and deployment specifications.
+ */
+export interface SolutionDesign {
+  markdown: string;
+  agentName: string;
+  conversationId: string;
+  responseId: string;
+  generatedAt: string;
+  userGuidance?: string;
 }
 
 export interface AnalysisResult {

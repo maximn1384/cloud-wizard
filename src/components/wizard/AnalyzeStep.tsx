@@ -333,7 +333,7 @@ export function AnalyzeStep() {
           onClick={() => {
             if (runId) {
               setStep('review');
-              navigate(`/runs/${runId}/review`);
+              navigate(`/runs/${runId}/design`);
             }
           }}
           disabled={!hasVersions}
