@@ -113,6 +113,29 @@ export function ConnectStep() {
     setStep('connect');
   }, [setStep]);
 
+  // Hydrate run from API if not in store (e.g. direct URL navigation)
+  useEffect(() => {
+    if (runId && !run) {
+      api.getRun(runId).then((r) => {
+        useRunStore.getState().setRun(r);
+      }).catch(() => {
+        // Run not found on backend — may have been lost on restart
+      });
+    }
+  }, [runId, run]);
+
+  // Sync local state when run data loads/changes
+  useEffect(() => {
+    if (run) {
+      setRunName(run.name);
+      setEnvUrl(run.environment.url || '');
+      setEditingName(!run.name || run.name === 'New Migration Run');
+      if (run.environment.validated) {
+        setConnectionResult({ valid: true });
+      }
+    }
+  }, [run?.id, run?.environment.url, run?.environment.validated, run?.name]);
+
   // Initialize from existing run
   useEffect(() => {
     if (run?.environment.validated) {

@@ -67,9 +67,13 @@ export function Sidebar() {
   const setActiveRun = useRunStore((s) => s.setActiveRun);
   const setRuns = useRunStore((s) => s.setRuns);
 
-  // Load runs from API on mount
+  // Load runs from API on mount (merge, don't overwrite if backend restarted)
   useEffect(() => {
-    api.listRuns().then(setRuns).catch(console.error);
+    api.listRuns().then((apiRuns) => {
+      if (apiRuns.length > 0) {
+        setRuns(apiRuns);
+      }
+    }).catch(console.error);
   }, [setRuns]);
 
   const handleNewRun = useCallback(async () => {

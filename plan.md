@@ -35,8 +35,8 @@
 | State | Zustand |
 | Excel Parsing | xlsx (SheetJS) |
 | Backend API | Express + tsx (TypeScript) |
-| AI Engine | Azure OpenAI SDK → Azure Foundry endpoint |
-| Dataverse Ops | MCP SDK (@modelcontextprotocol/sdk) → my-mcp-server |
+| AI Engine | `@azure/ai-projects` + `@azure/identity` → Azure AI Foundry **Agent** (via OpenAI Responses API) |
+| Dataverse Ops | Direct Web API calls (REST) with user's MSAL Bearer token |
 | IDs | uuid v11 |
 | Dev Tooling | concurrently (frontend + backend) |
 
@@ -193,58 +193,73 @@ interface SourceTable {
 
 ---
 
-## Phase 4: AI Analysis Engine (Journey C)
+## Phase 4: AI Analysis Engine (Journey C) ✅
 
-**Goal:** Integrate Azure Foundry AI model for schema recommendations, mapping proposals, and risk assessment.
+**Goal:** Integrate an Azure AI Foundry **Agent** to produce a first-draft requirements specification from parsed source metadata.
+
+### Implementation Notes (as built)
+
+- The agent (`Migration-Analyst`) lives on Azure AI Foundry — its system prompt, D365 native-table alignment rules, and output structure are owned by the **agent definition** (not embedded in this codebase). See `docs/agents/migration-analyst.md` for a reference copy.
+- Backend calls the agent through `@azure/ai-projects` → `getOpenAIClient()` → OpenAI **Responses API**, using the **`agent_reference`** pattern (the legacy `agent` property is rejected by the service).
+- Authentication uses `DefaultAzureCredential` from `@azure/identity`. Locally this resolves to `AzureCliCredential` after `az login` (no client secrets stored anywhere).
 
 ### Tasks
 
-4.1 **Backend: Azure Foundry AI client**
-- Configure Azure OpenAI SDK with Foundry endpoint
-- System prompt: encode Dynamics 365 native table alignment rules
-  - MUST map to native tables: Account, Contact, Case, Lead, Opportunity, etc.
-  - MUST leverage native D365 CRM capabilities
-- Build structured prompt: requirements + source metadata + previous iterations
+4.1 **Backend: Azure AI Foundry agent client** (`server/services/foundryAgent.ts`)
+- `AIProjectClient(endpoint, new DefaultAzureCredential())`
+- `project.getOpenAIClient()` → OpenAI Responses API
+- Conversation → response flow:
+  ```ts
+  const conversation = await openai.conversations.create({
+    items: [{ type: 'message', role: 'user', content: userPrompt }],
+  });
+  const response = await openai.responses.create({
+    conversation: conversation.id,
+    // Foundry-specific field; not in OpenAI SDK types → cast `as any`
+    agent_reference: { name: agentName, type: 'agent_reference' },
+  } as any);
+  ```
+- Returns `{ outputText, conversationId, responseId }`
+- Env vars: `AZURE_AI_PROJECT_ENDPOINT`, `AZURE_AI_AGENT_ID`
 
-4.2 **AI analysis endpoint**
+4.2 **AI analysis endpoint** (`server/routes/ai.ts`)
 - `POST /api/ai/analyze/:runId` – triggers analysis
-- Sends: run context, source metadata, user requirements, previous version edits
-- Returns: recommended schema, mapping, assumptions, risks, clarifying questions
-- Response stored as new `RunVersion`
+- Optional body: `{ feedback?: string }` for iterative re-analysis
+- Builds compact JSON payload (`buildAnalystInput`) from parsed `SourceFile[]` (columns, types, sample rows, detected keys & FK hints)
+- Stores the agent's markdown output as a `RequirementsDraft` on a new `RunVersion`
 
-4.3 **Structured AI output schema**
+4.3 **Output: requirements draft (markdown)**
 ```ts
-interface AnalysisResult {
-  recommendedSchema: DataverseSchemaProposal;
-  mappings: SourceToDestMapping[];
-  assumptions: string[];
-  risks: Risk[];
-  clarifyingQuestions: string[];
-  nativeTableAlignment: NativeTableMapping[];  // source → D365 native table
+interface RequirementsDraft {
+  markdown: string;          // agent's structured output
+  agentName: string;         // e.g. 'Migration-Analyst'
+  conversationId: string;    // Foundry conversation id (for follow-ups)
+  responseId: string;        // Foundry response id
+  generatedAt: string;       // ISO timestamp
+  userFeedback?: string;     // feedback passed for this iteration
 }
 ```
+_Note: the original plan called for a fully-typed `AnalysisResult` (schema/mappings/risks). The current draft is markdown; structured extraction is deferred to Phase 5 (Review & Mapping UI) where the user reviews and we parse/extract sections into editable form._
 
 4.4 **Iterative analysis loop**
-- Support re-analysis after user edits
-- Each analysis creates a new version (N+1)
-- Pass user edits/overrides back into the next prompt
+- `AnalyzeStep` UI exposes a feedback textarea + **Re-analyze** button
+- Each call creates a new `RunVersion` (N+1) with its own `RequirementsDraft`
+- Version selector (tabs) lets the user switch between drafts
 
-4.5 **Version diff logic**
-- Compare RunVersion N vs N-1
-- Show added/removed/changed fields, tables, mappings
-- Display in UI as a change summary
+4.5 **Version diff logic** _(deferred to Phase 5)_
+- Markdown drafts aren't well-suited to structured diffing; will be added once Phase 5 introduces a structured schema model.
 
-4.6 **Analysis progress UI**
-- "Analyze" button triggers async job
-- Progress indicator during AI call
-- Error handling with retry for transient failures
+4.6 **Analysis progress UI** (`src/components/wizard/AnalyzeStep.tsx`)
+- **Run Analysis** / **Re-analyze** buttons with spinner
+- Rendered with `react-markdown` + `remark-gfm` (tables, lists, code blocks)
+- Error banner with the backend's error message (e.g. credential failures, API errors)
 
 ### Deliverables
-- [ ] Azure Foundry AI endpoint configured and reachable
-- [ ] Analysis returns structured schema recommendations aligned to native D365 tables
-- [ ] Versioned results stored per run
-- [ ] Iterative re-analysis with user edits works
-- [ ] Version diff view available
+- [x] Foundry agent reachable via `agent_reference` pattern
+- [x] Analysis stored as versioned `RequirementsDraft` (markdown)
+- [x] Iterative re-analysis with user feedback works
+- [x] Markdown rendering of agent output in UI
+- [ ] Structured diff between versions (moved to Phase 5)
 
 ---
 
@@ -454,10 +469,17 @@ interface AnalysisResult {
 | express | API server |
 | cors | Cross-origin requests |
 | multer | File upload handling |
-| openai | Azure Foundry AI SDK |
-| @modelcontextprotocol/sdk | MCP client for Dataverse |
+| @azure/ai-projects | Azure AI Foundry client (agent calls via Responses API) |
+| @azure/identity | `DefaultAzureCredential` (resolves to `az login` locally) |
+| dotenv | Load `.env` into backend process |
 | uuid | ID generation (shared) |
 | xlsx | Excel parsing (server-side) |
+
+### Frontend additions (npm)
+| Package | Purpose |
+|---------|---------|
+| react-markdown + remark-gfm | Render the agent's markdown output (tables, lists, code) |
+| @azure/msal-browser | User sign-in & Dataverse Bearer tokens |
 
 ### Dev Dependencies
 | Package | Purpose |
@@ -490,9 +512,9 @@ interface AnalysisResult {
 
 | Milestone | Phases | What's Working |
 |-----------|--------|---------------|
-| **M1 – Foundation** | 1-2 | App shell, routing, run creation, env connection via MCP |
-| **M2 – Data Intake** | 3 | Excel upload, parsing, source metadata review |
-| **M3 – AI Analysis** | 4 | Azure Foundry integration, schema recommendations, versioning |
+| **M1 – Foundation** ✅ | 1-2 | App shell, routing, run creation, env connection (Dataverse WhoAmI) |
+| **M2 – Data Intake** ✅ | 3 | Excel upload, parsing, source metadata review |
+| **M3 – AI Analysis** ✅ | 4 | Foundry agent (`agent_reference`), versioned drafts, iterative feedback |
 | **M4 – Review UX** | 5-6 | Full review/mapping UI, approval gate |
 | **M5 – MVP Complete** | 7-8 | End-to-end: upload → analyze → approve → generate in D365 |
 | **M6 – Hardened** | 9 | Error handling, security, polish |

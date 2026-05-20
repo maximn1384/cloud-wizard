@@ -64,9 +64,23 @@ export interface RunVersion {
   versionNumber: number;
   createdAt: string;
   analysis: AnalysisResult | null;
+  requirementsDraft: RequirementsDraft | null;
   userEdits: UserEdit[];
   approval: Approval | null;
   generationJob: Job | null;
+}
+
+/**
+ * Requirements draft produced by the Migration-Analyst agent.
+ * Currently a markdown document; later phases may parse into structured form.
+ */
+export interface RequirementsDraft {
+  markdown: string;
+  agentName: string;
+  conversationId: string;
+  responseId: string;
+  generatedAt: string;
+  userFeedback?: string;
 }
 
 export interface AnalysisResult {

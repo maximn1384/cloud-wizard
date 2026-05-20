@@ -140,11 +140,22 @@ function parseWorkbook(buffer: Buffer, fileName: string): SourceTable[] {
 // Upload Excel files for a run
 uploadRouter.post('/:runId', upload.array('files', 20), async (req, res) => {
   const { runId } = req.params;
-  const run = runStorage.get(runId);
+  let run = runStorage.get(runId);
 
+  // Auto-create run if backend restarted and lost in-memory state
   if (!run) {
-    res.status(404).json({ error: 'Run not found' });
-    return;
+    run = {
+      id: runId,
+      name: 'Restored Run',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'connected',
+      environment: { url: '', validated: false, validatedAt: null },
+      sourceFiles: [],
+      versions: [],
+      currentVersionId: null,
+    };
+    runStorage.save(run);
   }
 
   const files = req.files as Express.Multer.File[] | undefined;

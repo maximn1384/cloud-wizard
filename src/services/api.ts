@@ -61,9 +61,10 @@ export const api = {
   },
 
   // Analysis
-  analyze: (runId: string) =>
+  analyze: (runId: string, feedback?: string) =>
     request<import('../types/run').RunVersion>(`/ai/analyze/${runId}`, {
       method: 'POST',
+      body: JSON.stringify({ feedback }),
     }),
 
   // Approval

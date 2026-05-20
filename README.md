@@ -10,6 +10,8 @@ AI-assisted migration tool for moving on-premise Dynamics 365 applications to D3
   - **Redirect URI:** `http://localhost:5174`
   - **API permission:** Dynamics CRM → `user_impersonation`
 - Access to a Dynamics 365 / Dataverse environment
+- For AI analysis (Phase 4): Azure AI Foundry project with a deployed agent
+  (we use `Migration-Analyst`). Authenticate locally with `az login`.
 
 ## Setup
 
@@ -100,4 +102,11 @@ instructions.md         → AI agent coding rules
 
 - Each developer uses their own `.env` (not committed to git)
 - See `plan.md` for the full implementation roadmap
-- Current status: Phases 1-3 complete (foundation, connection, upload)
+- Current status: **Phases 1-4 complete** — foundation, connection, upload, and AI analysis via Azure AI Foundry agent (`Migration-Analyst`)
+
+## Azure AI Foundry Agent Notes
+
+The analysis step calls a Foundry **agent** (not a raw model deployment) through the OpenAI Responses API. Two things to know:
+
+1. **Auth.** The backend uses `DefaultAzureCredential` from `@azure/identity`. Locally this resolves to `AzureCliCredential`, so you must run `az login` before starting the dev server. Your account needs at least the **Azure AI Developer** role on the Foundry project.
+2. **API shape.** Foundry's Responses API requires the `agent_reference` field on the request body (the older `agent` field is rejected). The OpenAI SDK types don't know about this, so the call uses an `as any` cast — see `server/services/foundryAgent.ts`.

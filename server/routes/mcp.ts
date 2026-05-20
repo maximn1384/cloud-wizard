@@ -46,27 +46,39 @@ mcpRouter.post('/test-connection', async (req, res) => {
 
   // Update run environment if connection is valid and runId was provided
   if (result.valid && runId) {
-    const run = runStorage.get(runId);
-    if (run) {
-      run.environment = {
-        url,
-        validated: true,
-        validatedAt: new Date().toISOString(),
+    let run = runStorage.get(runId);
+    if (!run) {
+      // Auto-create run if backend restarted
+      run = {
+        id: runId,
+        name: 'Restored Run',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        status: 'draft',
+        environment: { url: '', validated: false, validatedAt: null },
+        sourceFiles: [],
+        versions: [],
+        currentVersionId: null,
       };
-      run.status = 'connected';
-      run.updatedAt = new Date().toISOString();
-      runStorage.save(run);
-
-      runStorage.addLog(runId, {
-        id: uuidv4(),
-        runId,
-        timestamp: new Date().toISOString(),
-        level: 'info',
-        category: 'system',
-        message: `Environment connection validated: ${url}`,
-        details: { tableCount: result.tables?.length ?? 0 },
-      });
     }
+    run.environment = {
+      url,
+      validated: true,
+      validatedAt: new Date().toISOString(),
+    };
+    run.status = 'connected';
+    run.updatedAt = new Date().toISOString();
+    runStorage.save(run);
+
+    runStorage.addLog(runId, {
+      id: uuidv4(),
+      runId,
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      category: 'system',
+      message: `Environment connection validated: ${url}`,
+      details: { tableCount: result.tables?.length ?? 0 },
+    });
   }
 
   res.json(result);
