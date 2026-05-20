@@ -81,11 +81,58 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approvedBy }) }
     ),
 
-  // Generation (Builder agent)
-  generate: (runId: string) =>
-    request<import('../types/run').RunVersion>(`/ai/generate/${runId}`, {
+  // Generation (Builder agent — SSE streaming)
+  generateStream: (
+    runId: string,
+    onDelta: (text: string) => void,
+    onDone: () => void,
+    onError: (error: string) => void
+  ) => {
+    const controller = new AbortController();
+    fetch(`${API_BASE}/ai/generate/${runId}`, {
       method: 'POST',
-    }),
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.text();
+          onError(`API ${res.status}: ${body}`);
+          return;
+        }
+        const reader = res.body?.getReader();
+        if (!reader) {
+          onError('No response stream');
+          return;
+        }
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const event = JSON.parse(line.slice(6));
+              if (event.type === 'delta') onDelta(event.text);
+              else if (event.type === 'done') onDone();
+              else if (event.type === 'error') onError(event.error);
+            } catch {
+              // skip malformed lines
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        if (err.name !== 'AbortError') {
+          onError(err instanceof Error ? err.message : 'Stream failed');
+        }
+      });
+    return controller;
+  },
 
   // Logs
   getLogs: (runId: string) =>

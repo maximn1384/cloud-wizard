@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Title2,
   Title3,
@@ -7,7 +7,6 @@ import {
   Card,
   CardHeader,
   Badge,
-  Spinner,
   MessageBar,
   MessageBarBody,
   MessageBarTitle,
@@ -55,7 +54,9 @@ const useStyles = makeStyles({
   },
   reportCard: {
     padding: '20px',
-    minHeight: '300px',
+    minHeight: '200px',
+    maxHeight: '500px',
+    overflowY: 'auto' as const,
   },
   markdown: {
     '& h1': { fontSize: '1.5rem', fontWeight: 600, marginTop: '1em' },
@@ -131,11 +132,21 @@ export function GenerateStep() {
   const setRun = useRunStore((s) => s.setRun);
 
   const [isGenerating, setIsGenerating] = useState(false);
+  const [streamText, setStreamText] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const streamRef = useRef<AbortController | null>(null);
+  const streamEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setStep('generate');
   }, [setStep]);
+
+  // Auto-scroll to bottom as streaming text arrives
+  useEffect(() => {
+    if (isGenerating && streamEndRef.current) {
+      streamEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [streamText, isGenerating]);
 
   const versions = run?.versions ?? [];
   const currentVersion =
@@ -146,24 +157,31 @@ export function GenerateStep() {
   const approval = currentVersion?.approval;
   const generationResult = (currentVersion as any)?.generationResult;
   const isApproved = !!approval;
-  const isCompleted = !!generationResult;
+  const isCompleted = !!generationResult && !isGenerating;
 
-  const handleGenerate = async () => {
+  const handleGenerate = useCallback(() => {
     if (!runId) return;
     setIsGenerating(true);
+    setStreamText('');
     setError(null);
 
-    try {
-      await api.generate(runId);
-      const updated = await api.getRun(runId);
-      setRun(updated);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Generation failed';
-      setError(message);
-    } finally {
-      setIsGenerating(false);
-    }
-  };
+    const controller = api.generateStream(
+      runId,
+      (delta) => {
+        setStreamText((prev) => prev + delta);
+      },
+      async () => {
+        const updated = await api.getRun(runId);
+        setRun(updated);
+        setIsGenerating(false);
+      },
+      (errMsg) => {
+        setError(errMsg);
+        setIsGenerating(false);
+      }
+    );
+    streamRef.current = controller;
+  }, [runId, setRun]);
 
   return (
     <div className={styles.root}>
@@ -239,17 +257,23 @@ export function GenerateStep() {
       )}
 
       {isGenerating && (
-        <div className={styles.spinnerContainer}>
-          <Spinner size="medium" />
-          <div>
-            <Text weight="semibold">Solution-Builder is deploying...</Text>
-            <br />
-            <Text size={200}>
-              The agent is inspecting the environment, creating schema, and verifying
-              changes. This may take a few minutes.
-            </Text>
+        <Card className={styles.reportCard}>
+          <CardHeader
+            header={
+              <Title3>
+                <span style={{ color: tokens.colorBrandForeground1 }}>
+                  ● Solution-Builder is deploying...
+                </span>
+              </Title3>
+            }
+          />
+          <div className={styles.markdown}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {streamText || '_Connecting to agent..._'}
+            </ReactMarkdown>
+            <div ref={streamEndRef} />
           </div>
-        </div>
+        </Card>
       )}
 
       {isCompleted && (

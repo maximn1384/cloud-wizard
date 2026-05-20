@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { runStorage } from '../services/runStorage';
-import { runAnalystAgent, runFoundryAgent } from '../services/foundryAgent';
+import { runAnalystAgent, runFoundryAgent, runFoundryAgentStream } from '../services/foundryAgent';
 import type { RunVersion } from '../../src/types/run';
 
 export const aiRouter = Router();
@@ -218,8 +218,8 @@ aiRouter.post('/design/:runId', async (req, res) => {
 
 /**
  * Run the Solution-Builder agent to execute the approved design in D365.
- * The agent has Dataverse MCP tools attached and will autonomously create/update
- * tables, fields, relationships, and migrate data as specified in the design.
+ * Streams the agent's output via Server-Sent Events (SSE) so the frontend
+ * can show real-time deployment progress.
  */
 aiRouter.post('/generate/:runId', async (req, res) => {
   const { runId } = req.params;
@@ -258,13 +258,20 @@ aiRouter.post('/generate/:runId', async (req, res) => {
     return;
   }
 
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
   runStorage.addLog(runId, {
     id: uuidv4(),
     runId,
     timestamp: new Date().toISOString(),
     level: 'info',
     category: 'ai',
-    message: 'Starting Solution-Builder generation',
+    message: 'Starting Solution-Builder generation (streaming)',
     details: {
       versionId: currentVersion.id,
       environmentUrl,
@@ -301,7 +308,14 @@ aiRouter.post('/generate/:runId', async (req, res) => {
       '```',
     ].join('\n');
 
-    const result = await runFoundryAgent(agentName, generatePrompt);
+    const result = await runFoundryAgentStream(
+      agentName,
+      generatePrompt,
+      (delta) => {
+        // Send each text chunk as an SSE event
+        res.write(`data: ${JSON.stringify({ type: 'delta', text: delta })}\n\n`);
+      }
+    );
 
     // Store the generation result on the current version
     (currentVersion as any).generationResult = {
@@ -330,7 +344,9 @@ aiRouter.post('/generate/:runId', async (req, res) => {
       },
     });
 
-    res.json(currentVersion);
+    // Send completion event with full version data
+    res.write(`data: ${JSON.stringify({ type: 'done', version: currentVersion })}\n\n`);
+    res.end();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 
@@ -348,6 +364,8 @@ aiRouter.post('/generate/:runId', async (req, res) => {
       details: { error: message },
     });
 
-    res.status(500).json({ error: message });
+    // Send error as SSE event and close
+    res.write(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`);
+    res.end();
   }
 });

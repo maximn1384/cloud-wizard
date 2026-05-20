@@ -88,6 +88,49 @@ export async function runFoundryAgent(
 }
 
 /**
+ * Call any Azure AI Foundry agent with streaming.
+ * Yields text deltas as they arrive so the caller can push them to the client.
+ */
+export async function runFoundryAgentStream(
+  agentName: string,
+  userPrompt: string,
+  onDelta: (text: string) => void
+): Promise<{ outputText: string; conversationId: string; responseId: string }> {
+  const project = getProject();
+  const openai = project.getOpenAIClient();
+
+  const conversation = await openai.conversations.create({
+    items: [{ type: 'message', role: 'user', content: userPrompt }],
+  });
+
+  const stream = await openai.responses.create({
+    conversation: conversation.id,
+    agent_reference: { name: agentName, type: 'agent_reference' },
+    stream: true,
+  } as any);
+
+  let fullText = '';
+  let responseId = '';
+
+  for await (const event of stream) {
+    if (event.type === 'response.output_text.delta') {
+      const delta = (event as any).delta ?? '';
+      fullText += delta;
+      onDelta(delta);
+    }
+    if (event.type === 'response.completed') {
+      responseId = (event as any).response?.id ?? '';
+    }
+  }
+
+  return {
+    outputText: fullText,
+    conversationId: conversation.id,
+    responseId,
+  };
+}
+
+/**
  * Call the Migration-Analyst agent on Azure AI Foundry.
  * Returns the agent's structured response as markdown text.
  */
