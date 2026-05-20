@@ -56,6 +56,7 @@ aiRouter.post('/analyze/:runId', async (req, res) => {
         generatedAt: new Date().toISOString(),
         userFeedback: feedback,
       },
+      solutionDesign: null,
       userEdits: [],
       approval: null,
       generationJob: null,

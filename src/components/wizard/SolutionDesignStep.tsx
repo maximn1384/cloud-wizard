@@ -18,7 +18,7 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import {
-  FlowElement20Regular,
+  DesignIdeas20Regular,
   ArrowRight20Regular,
   ArrowLeft20Regular,
   History20Regular,
@@ -172,7 +172,7 @@ export function SolutionDesignStep() {
   return (
     <div className={styles.root}>
       <div className={styles.header}>
-        <FlowElement20Regular />
+        <DesignIdeas20Regular />
         <Title2>Solution Design</Title2>
       </div>
       <Text>
