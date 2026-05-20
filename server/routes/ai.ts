@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { runStorage } from '../services/runStorage';
-import { runAnalystAgent, runFoundryAgent, runFoundryAgentStream } from '../services/foundryAgent';
+import { runAnalystAgent, runFoundryAgent, runFoundryAgentStream, runAgentWithTools } from '../services/foundryAgent';
 import type { RunVersion } from '../../src/types/run';
 
 export const aiRouter = Router();
@@ -308,7 +308,7 @@ aiRouter.post('/generate/:runId', async (req, res) => {
       '```',
     ].join('\n');
 
-    const result = await runFoundryAgentStream(
+    const result = await runAgentWithTools(
       agentName,
       generatePrompt,
       (delta) => {
@@ -321,8 +321,8 @@ aiRouter.post('/generate/:runId', async (req, res) => {
     (currentVersion as any).generationResult = {
       markdown: result.outputText,
       agentName,
-      conversationId: result.conversationId,
-      responseId: result.responseId,
+      conversationId: result.threadId,
+      responseId: result.runId,
       generatedAt: new Date().toISOString(),
       environmentUrl,
     };

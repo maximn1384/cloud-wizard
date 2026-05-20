@@ -131,6 +131,70 @@ export async function runFoundryAgentStream(
 }
 
 /**
+ * Run a Foundry agent via the Assistants/Threads API (beta).
+ * This API properly activates the agent's configured tools (MCP, code interpreter, etc.)
+ * unlike the Responses API + agent_reference which only uses the system prompt.
+ *
+ * Uses streaming to yield text deltas for real-time UI updates.
+ */
+export async function runAgentWithTools(
+  agentName: string,
+  userPrompt: string,
+  onDelta: (text: string) => void
+): Promise<{ outputText: string; threadId: string; runId: string }> {
+  const project = getProject();
+  const openai = project.getOpenAIClient();
+
+  // 1. Find the agent by name from the assistants list
+  let agentId: string | null = null;
+  for await (const assistant of openai.beta.assistants.list()) {
+    if (assistant.name === agentName) {
+      agentId = assistant.id;
+      break;
+    }
+  }
+  if (!agentId) {
+    throw new Error(
+      `Agent '${agentName}' not found. Check the agent name in Foundry and AZURE_AI_BUILDER_AGENT_ID.`
+    );
+  }
+
+  // 2. Create a thread with the user message and stream the run
+  const stream = openai.beta.threads.createAndRunStream({
+    assistant_id: agentId,
+    thread: {
+      messages: [{ role: 'user', content: userPrompt }],
+    },
+  });
+
+  let fullText = '';
+  let threadId = '';
+  let runId = '';
+
+  for await (const event of stream) {
+    // Extract IDs from run events
+    if (event.event === 'thread.run.created') {
+      threadId = event.data.thread_id;
+      runId = event.data.id;
+    }
+    // Capture text deltas
+    if (event.event === 'thread.message.delta') {
+      const delta = event.data.delta;
+      if (delta?.content) {
+        for (const block of delta.content) {
+          if (block.type === 'text' && block.text?.value) {
+            fullText += block.text.value;
+            onDelta(block.text.value);
+          }
+        }
+      }
+    }
+  }
+
+  return { outputText: fullText, threadId, runId };
+}
+
+/**
  * Call the Migration-Analyst agent on Azure AI Foundry.
  * Returns the agent's structured response as markdown text.
  */
