@@ -68,6 +68,7 @@ export interface RunVersion {
   solutionDesign: SolutionDesign | null;
   userEdits: UserEdit[];
   approval: Approval | null;
+  generationResult: GenerationResult | null;
   generationJob: Job | null;
 }
 
@@ -171,6 +172,18 @@ export interface Approval {
   versionId: string;
   approvedAt: string;
   approvedBy: string;
+}
+
+/**
+ * Deployment report produced by the Solution-Builder agent.
+ */
+export interface GenerationResult {
+  markdown: string;
+  agentName: string;
+  conversationId: string;
+  responseId: string;
+  generatedAt: string;
+  environmentUrl: string;
 }
 
 export interface Job {

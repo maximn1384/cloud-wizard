@@ -81,14 +81,11 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approvedBy }) }
     ),
 
-  // Generation
-  generate: (runId: string, versionId: string) =>
-    request<import('../types/run').Job>(
-      `/mcp/generate/${runId}/${versionId}`,
-      { method: 'POST' }
-    ),
-  getJob: (jobId: string) =>
-    request<import('../types/run').Job>(`/mcp/jobs/${jobId}`),
+  // Generation (Builder agent)
+  generate: (runId: string) =>
+    request<import('../types/run').RunVersion>(`/ai/generate/${runId}`, {
+      method: 'POST',
+    }),
 
   // Logs
   getLogs: (runId: string) =>

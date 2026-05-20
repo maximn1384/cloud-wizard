@@ -362,54 +362,83 @@ interface SolutionDesign {
 
 ---
 
-## Phase 7: Artifact Generation via MCP (Journey F)
+## Phase 7: Artifact Generation via Solution-Builder Agent (Journey F) 🔄
 
-**Goal:** Execute approved schema changes in target D365 environment using MCP tools.
+**Goal:** Execute approved schema changes in target D365 environment using the Solution-Builder agent, which has Dataverse MCP tools attached and operates autonomously.
+
+### Architecture
+
+The Solution-Builder agent is the **third agent** in the pipeline:
+
+```
+Migration-Analyst (requirements) → Solution-Architect (design) → [approval] → Solution-Builder (execution)
+```
+
+Unlike the previous agents which only reason, the Builder agent has **Dataverse MCP tools** attached in Foundry. It autonomously:
+- Inspects the target environment (what exists)
+- Creates/updates tables and columns
+- Creates relationships
+- Migrates data
+- Verifies changes
+- **Adapts mid-execution** if it encounters errors (e.g., column already exists → skip, table missing → create first)
+
+The app's role is **orchestrator** — it sends the approved design, receives the deployment report, and logs everything.
+
+### Implementation Notes (as built)
+
+- Agent (`Solution-Builder`) lives on Azure AI Foundry with Dataverse MCP tool attached
+- MCP tool uses `DataverseMCPServerId` parameter (set as variable for dynamic environments)
+- Remote MCP Server endpoint: `https://agent365.svc.cloud.microsoft/agents/servers/Dataverse/{environment-url}`
+- Auth: OAuth Identity Passthrough (Managed provider) → user's identity flows through to Dataverse
+- Backend calls the agent through the same `runFoundryAgent()` pattern as other agents
+- Environment URL passed in the prompt (from `run.environment.url`)
 
 ### Tasks
 
-7.1 **Backend: MCP execution engine**
-- Build execution plan from approved version
-- Step sequence:
-  1. Create/verify solution in Dataverse
-  2. For each recommended table: check if native table exists (describe_table) → update with new fields (update_table) or create new (create_table)
-  3. Create relationships between tables
-  4. Optionally migrate sample data (create_record)
-- Idempotent: check before create, skip if already exists
+7.1 **Backend: Generation endpoint** (`server/routes/ai.ts`)
+- `POST /api/ai/generate/:runId` – triggers Solution-Builder agent
+- Validates: version exists, is approved, has solution design, has environment URL
+- Builds prompt with approved design + target environment URL
+- Agent executes autonomously using its MCP tools
+- Stores agent's deployment report as `GenerationResult` on current version
+- Sets run status to `completed` on success
+- Env vars: `AZURE_AI_BUILDER_AGENT_ID`
 
-7.2 **MCP execution endpoints**
-- `POST /api/mcp/generate/:runId/:versionId` – triggers generation
-- Returns job ID for tracking
-- `GET /api/mcp/jobs/:jobId` – poll for status
+7.2 **Generation output schema**
+```ts
+interface GenerationResult {
+  markdown: string;          // deployment report from Builder agent
+  agentName: string;         // 'Solution-Builder'
+  conversationId: string;    // Foundry conversation id
+  responseId: string;        // Foundry response id
+  generatedAt: string;       // ISO timestamp
+  environmentUrl: string;    // target D365 environment
+}
+```
 
-7.3 **Execution plan preview**
-- Before execution, show user the exact steps that will run
-- Table: Action | Target | Details | Status
-- Example: "Add field 'CustomerTier' to Account table"
+7.3 **Generation UI** (`src/components/wizard/GenerateStep.tsx`)
+- Deployment target summary card (environment, design agent, approval info)
+- **Deploy to Environment** button (disabled until approved)
+- Spinner with progress message during agent execution
+- Deployment report rendered as markdown (tables, lists, code blocks)
+- Green "Deployment Complete" banner with environment URL
+- Re-deploy button for re-running on the same version
+- Navigation: Back to Approve → View Logs
 
-7.4 **Step-by-step execution with logging**
-- Each MCP call logged as a `LogEntry`
-- Capture: timestamp, action, target, input, output, success/failure
-- On failure: stop execution, capture error details, allow retry from failed step
-
-7.5 **Generation progress UI**
-- Real-time step progress (polling or SSE)
-- Green/red indicators per step
-- Error details with actionable messages
-- "Retry from step N" capability
-
-7.6 **Data migration (basic)**
-- After schema is created, optionally migrate rows from Excel
-- Map source rows using approved mappings
-- Batch insert via `create_record`
-- Report: rows attempted, succeeded, failed
+7.4 **Agent system instructions** (configured in Foundry portal)
+- Inspect before modifying (describe_table before update_table)
+- Prefer native D365 tables (Account, Contact, Case, etc.)
+- Idempotent: skip existing artifacts, don't create duplicates
+- Handle errors gracefully: log, continue independent steps, summarize
+- Structured deployment report output (pre-inspection, execution log, verification)
 
 ### Deliverables
-- [ ] MCP execution creates solution + schema in Dataverse
-- [ ] Idempotent – safe to re-run
-- [ ] Step-by-step logging with error capture
-- [ ] Basic data migration from Excel rows
-- [ ] Real-time progress UI
+- [x] Builder agent callable via `agent_reference` pattern
+- [x] Backend validates approval before generation
+- [x] Generation result stored on RunVersion
+- [x] Full deployment UI with progress and report rendering
+- [ ] Verify agent's MCP tool connectivity to Dataverse (needs live test)
+- [ ] Dynamic `DataverseMCPServerId` parameter passing at call time
 
 ---
 
@@ -546,5 +575,6 @@ interface SolutionDesign {
 | **M3 – AI Analysis** ✅ | 4 | Migration-Analyst agent, versioned requirements drafts, iterative feedback |
 | **M4 – Solution Design** 🔄 | 5 | Solution-Architect agent, D365 design specifications, user guidance loop |
 | **M5 – Approval Gate** ✅ | 6 | Lightweight approval + confirmation before generation |
+| **M5b – Generation** 🔄 | 7 | Solution-Builder agent deploys approved design to D365 via MCP |
 | **M5 – MVP Complete** | 7-8 | End-to-end: upload → analyze → approve → generate in D365 |
 | **M6 – Hardened** | 9 | Error handling, security, polish |

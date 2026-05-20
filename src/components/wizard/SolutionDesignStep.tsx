@@ -128,7 +128,7 @@ export function SolutionDesignStep() {
   const setStep = useUiStore((s) => s.setStep);
 
   const run = useRunStore((s) => s.runs.find((r) => r.id === runId));
-  const updateRun = useRunStore((s) => s.updateRun);
+  const setRun = useRunStore((s) => s.setRun);
 
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [guidance, setGuidance] = useState('');
@@ -157,10 +157,11 @@ export function SolutionDesignStep() {
     setError(null);
 
     try {
-      const version = await api.design(runId, guidance || undefined);
-      updateRun({ ...run!, versions: run!.versions.map((v) => (v.id === version.id ? version : v)), currentVersionId: version.id });
+      await api.design(runId, guidance || undefined);
+      const updated = await api.getRun(runId);
+      setRun(updated);
       setGuidance('');
-      setSelectedVersionId(version.id);
+      setSelectedVersionId(updated.currentVersionId);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Design failed';
       setError(message);

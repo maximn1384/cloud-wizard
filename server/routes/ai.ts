@@ -215,3 +215,139 @@ aiRouter.post('/design/:runId', async (req, res) => {
     res.status(500).json({ error: message });
   }
 });
+
+/**
+ * Run the Solution-Builder agent to execute the approved design in D365.
+ * The agent has Dataverse MCP tools attached and will autonomously create/update
+ * tables, fields, relationships, and migrate data as specified in the design.
+ */
+aiRouter.post('/generate/:runId', async (req, res) => {
+  const { runId } = req.params;
+
+  const run = runStorage.get(runId);
+  if (!run) {
+    res.status(404).json({ error: 'Run not found' });
+    return;
+  }
+
+  const currentVersion = run.versions.find((v) => v.id === run.currentVersionId);
+  if (!currentVersion) {
+    res.status(400).json({ error: 'No current version found.' });
+    return;
+  }
+
+  if (!currentVersion.approval) {
+    res.status(400).json({
+      error: 'Version must be approved before generation. Please approve first.',
+    });
+    return;
+  }
+
+  if (!currentVersion.solutionDesign) {
+    res.status(400).json({
+      error: 'No solution design found. Please run Solution Design (Phase 5) first.',
+    });
+    return;
+  }
+
+  const environmentUrl = run.environment.url;
+  if (!environmentUrl) {
+    res.status(400).json({
+      error: 'No environment URL configured. Please connect to a D365 environment first.',
+    });
+    return;
+  }
+
+  runStorage.addLog(runId, {
+    id: uuidv4(),
+    runId,
+    timestamp: new Date().toISOString(),
+    level: 'info',
+    category: 'ai',
+    message: 'Starting Solution-Builder generation',
+    details: {
+      versionId: currentVersion.id,
+      environmentUrl,
+      designAgent: currentVersion.solutionDesign.agentName,
+    },
+  });
+
+  run.status = 'generating';
+  run.updatedAt = new Date().toISOString();
+  runStorage.save(run);
+
+  try {
+    const agentName =
+      process.env.AZURE_AI_BUILDER_AGENT_ID ?? 'Solution-Builder';
+
+    const generatePrompt = [
+      'You are receiving an approved solution design for a Dynamics 365 migration.',
+      'Execute this design in the target Dataverse environment using your MCP tools.',
+      '',
+      `**Target Environment:** ${environmentUrl}`,
+      '',
+      'Follow your system instructions:',
+      '1. Inspect the environment first (list_tables, describe_table)',
+      '2. Deploy schema changes (create/update tables and columns)',
+      '3. Create relationships',
+      '4. Migrate data if specified',
+      '5. Verify all changes',
+      '',
+      'Produce a complete deployment report.',
+      '',
+      '--- APPROVED SOLUTION DESIGN ---',
+      '```markdown',
+      currentVersion.solutionDesign.markdown,
+      '```',
+    ].join('\n');
+
+    const result = await runFoundryAgent(agentName, generatePrompt);
+
+    // Store the generation result on the current version
+    (currentVersion as any).generationResult = {
+      markdown: result.outputText,
+      agentName,
+      conversationId: result.conversationId,
+      responseId: result.responseId,
+      generatedAt: new Date().toISOString(),
+      environmentUrl,
+    };
+
+    run.status = 'completed';
+    run.updatedAt = new Date().toISOString();
+    runStorage.save(run);
+
+    runStorage.addLog(runId, {
+      id: uuidv4(),
+      runId,
+      timestamp: new Date().toISOString(),
+      level: 'info',
+      category: 'ai',
+      message: `Generation completed (${result.outputText.length} chars)`,
+      details: {
+        versionId: currentVersion.id,
+        conversationId: result.conversationId,
+      },
+    });
+
+    res.json(currentVersion);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+
+    run.status = 'error';
+    run.updatedAt = new Date().toISOString();
+    runStorage.save(run);
+
+    runStorage.addLog(runId, {
+      id: uuidv4(),
+      runId,
+      timestamp: new Date().toISOString(),
+      level: 'error',
+      category: 'ai',
+      message: 'Generation failed',
+      details: { error: message },
+    });
+
+    res.status(500).json({ error: message });
+  }
+});
