@@ -369,3 +369,76 @@ aiRouter.post('/generate/:runId', async (req, res) => {
     res.end();
   }
 });
+
+/**
+ * DEBUG / TEST ENDPOINT: Call the Builder agent directly with a design + environment URL.
+ * No run, no approval, no version needed. Streams SSE.
+ *
+ * Usage:
+ *   curl -N -X POST http://localhost:3001/api/ai/generate-test \
+ *     -H "Content-Type: application/json" \
+ *     -d '{"environmentUrl":"https://org41476d09.crm.dynamics.com","design":"..."}'
+ */
+aiRouter.post('/generate-test', async (req, res) => {
+  const { environmentUrl, design } = req.body as {
+    environmentUrl: string;
+    design: string;
+  };
+
+  if (!environmentUrl || !design) {
+    res.status(400).json({
+      error: 'Required: { environmentUrl: string, design: string }',
+    });
+    return;
+  }
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const agentName =
+    process.env.AZURE_AI_BUILDER_AGENT_ID ?? 'Solution-Builder';
+
+  const generatePrompt = [
+    'You are receiving an approved solution design for a Dynamics 365 migration.',
+    'Execute this design in the target Dataverse environment using your MCP tools.',
+    '',
+    `**Target Environment:** ${environmentUrl}`,
+    '',
+    'Follow your system instructions:',
+    '1. Inspect the environment first (list_tables, describe_table)',
+    '2. Deploy schema changes (create/update tables and columns)',
+    '3. Create relationships',
+    '4. Migrate data if specified',
+    '5. Verify all changes',
+    '',
+    'Produce a complete deployment report.',
+    '',
+    '--- APPROVED SOLUTION DESIGN ---',
+    '```markdown',
+    design,
+    '```',
+  ].join('\n');
+
+  console.log(`[generate-test] Calling ${agentName} for ${environmentUrl}`);
+
+  try {
+    const result = await runAgentWithTools(agentName, generatePrompt, (delta) => {
+      res.write(`data: ${JSON.stringify({ type: 'delta', text: delta })}\n\n`);
+    });
+
+    console.log(
+      `[generate-test] Done (${result.outputText.length} chars, threadId=${result.threadId})`
+    );
+    res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+    res.end();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[generate-test] Error: ${message}`);
+    res.write(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`);
+    res.end();
+  }
+});
