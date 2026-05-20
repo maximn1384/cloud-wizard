@@ -3,6 +3,14 @@ import { DefaultAzureCredential } from '@azure/identity';
 import type { SourceFile, SourceTable } from '../../src/types/run';
 
 let cachedClient: AIProjectClient | null = null;
+let cachedCredential: DefaultAzureCredential | null = null;
+
+function getCredential(): DefaultAzureCredential {
+  if (!cachedCredential) {
+    cachedCredential = new DefaultAzureCredential();
+  }
+  return cachedCredential;
+}
 
 function getProject(): AIProjectClient {
   if (cachedClient) return cachedClient;
@@ -14,7 +22,7 @@ function getProject(): AIProjectClient {
     );
   }
 
-  cachedClient = new AIProjectClient(endpoint, new DefaultAzureCredential());
+  cachedClient = new AIProjectClient(endpoint, getCredential());
   return cachedClient;
 }
 
@@ -131,90 +139,130 @@ export async function runFoundryAgentStream(
 }
 
 /**
- * Run a Foundry agent via the Assistants/Threads API (beta).
- * This API properly activates the agent's configured tools (MCP, code interpreter, etc.)
- * unlike the Responses API + agent_reference which only uses the system prompt.
+ * Run a Foundry agent via its native Activity Protocol endpoint.
+ * This properly activates the agent's configured tools (MCP, etc.)
  *
- * Uses streaming to yield text deltas for real-time UI updates.
- * Falls back to the Responses API streaming if the Assistants API returns 404.
+ * The endpoint URL pattern:
+ *   {project-endpoint}/agents/{agentName}/endpoint/protocols/activityprotocol
+ *
+ * Auth: Bearer token from DefaultAzureCredential scoped to the Foundry endpoint.
+ * Streams the response and yields text deltas for real-time UI updates.
  */
 export async function runAgentWithTools(
   agentName: string,
   userPrompt: string,
   onDelta: (text: string) => void
 ): Promise<{ outputText: string; threadId: string; runId: string }> {
-  const project = getProject();
-  const openai = project.getOpenAIClient();
+  const projectEndpoint = process.env.AZURE_AI_PROJECT_ENDPOINT;
+  if (!projectEndpoint) {
+    throw new Error('AZURE_AI_PROJECT_ENDPOINT not configured.');
+  }
 
-  // Try Assistants/Threads API first (activates agent tools)
-  try {
-    // Use agent name directly as the assistant_id (Foundry convention)
-    const stream = openai.beta.threads.createAndRunStream({
-      assistant_id: agentName,
-      thread: {
-        messages: [{ role: 'user', content: userPrompt }],
-      },
-    });
+  // Build the Activity Protocol endpoint URL
+  const agentUrl = `${projectEndpoint}/agents/${agentName}/endpoint/protocols/activityprotocol`;
 
+  // Get a Bearer token scoped to the Foundry endpoint
+  const credential = getCredential();
+  // Try cognitive services scope first, then the endpoint-specific scope
+  const scopes = ['https://cognitiveservices.azure.com/.default'];
+  const tokenResponse = await credential.getToken(scopes);
+  if (!tokenResponse?.token) {
+    throw new Error('Failed to acquire access token for Foundry endpoint.');
+  }
+
+  console.log(`[foundryAgent] Calling Activity Protocol: ${agentUrl}`);
+
+  // Activity Protocol request — Bot Framework-style activity
+  const activity = {
+    type: 'message',
+    text: userPrompt,
+    from: { id: 'cloud-wizard-app' },
+  };
+
+  const response = await fetch(agentUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${tokenResponse.token}`,
+    },
+    body: JSON.stringify(activity),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    console.error(
+      `[foundryAgent] Activity Protocol error: ${response.status} ${errorBody}`
+    );
+    throw new Error(
+      `Agent API ${response.status}: ${errorBody || response.statusText}`
+    );
+  }
+
+  // Check if the response is streamed (SSE / chunked) or a single JSON response
+  const contentType = response.headers.get('content-type') ?? '';
+
+  if (contentType.includes('text/event-stream') || contentType.includes('ndjson')) {
+    // Streaming response — parse SSE or newline-delimited JSON
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body from agent');
+
+    const decoder = new TextDecoder();
     let fullText = '';
-    let threadId = '';
-    let runId = '';
+    let buffer = '';
 
-    for await (const event of stream) {
-      if (event.event === 'thread.run.created') {
-        threadId = event.data.thread_id;
-        runId = event.data.id;
-      }
-      if (event.event === 'thread.message.delta') {
-        const delta = event.data.delta;
-        if (delta?.content) {
-          for (const block of delta.content) {
-            if (block.type === 'text' && block.text?.value) {
-              fullText += block.text.value;
-              onDelta(block.text.value);
-            }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+
+        // Handle SSE format (data: {...})
+        const jsonStr = trimmed.startsWith('data: ')
+          ? trimmed.slice(6)
+          : trimmed;
+
+        try {
+          const event = JSON.parse(jsonStr);
+          // Extract text from various possible formats
+          const text =
+            event.text ??
+            event.delta?.text ??
+            event.delta?.content ??
+            event.choices?.[0]?.delta?.content ??
+            '';
+          if (text) {
+            fullText += text;
+            onDelta(text);
+          }
+        } catch {
+          // Not JSON — might be raw text
+          if (trimmed && !trimmed.startsWith('event:') && !trimmed.startsWith(':')) {
+            fullText += trimmed;
+            onDelta(trimmed);
           }
         }
       }
     }
 
-    return { outputText: fullText, threadId, runId };
-  } catch (err: unknown) {
-    const status = (err as any)?.status ?? (err as any)?.code;
-    console.log(
-      `[foundryAgent] Assistants API failed (status=${status}), falling back to Responses API streaming`
-    );
+    return { outputText: fullText, threadId: '', runId: '' };
+  } else {
+    // Single JSON response
+    const body = await response.json();
+    const text =
+      body.text ??
+      body.reply ??
+      body.activities?.[0]?.text ??
+      body.output_text ??
+      JSON.stringify(body, null, 2);
 
-    // Fallback: use Responses API with streaming + agent_reference
-    const conversation = await openai.conversations.create({
-      items: [{ type: 'message', role: 'user', content: userPrompt }],
-    });
-
-    const stream = await openai.responses.create({
-      conversation: conversation.id,
-      agent_reference: { name: agentName, type: 'agent_reference' },
-      stream: true,
-    } as any);
-
-    let fullText = '';
-    let responseId = '';
-
-    for await (const event of stream) {
-      if (event.type === 'response.output_text.delta') {
-        const delta = (event as any).delta ?? '';
-        fullText += delta;
-        onDelta(delta);
-      }
-      if (event.type === 'response.completed') {
-        responseId = (event as any).response?.id ?? '';
-      }
-    }
-
-    return {
-      outputText: fullText,
-      threadId: conversation.id,
-      runId: responseId,
-    };
+    onDelta(text);
+    return { outputText: text, threadId: '', runId: '' };
   }
 }
 
