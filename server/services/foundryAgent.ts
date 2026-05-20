@@ -136,6 +136,7 @@ export async function runFoundryAgentStream(
  * unlike the Responses API + agent_reference which only uses the system prompt.
  *
  * Uses streaming to yield text deltas for real-time UI updates.
+ * Falls back to the Responses API streaming if the Assistants API returns 404.
  */
 export async function runAgentWithTools(
   agentName: string,
@@ -145,53 +146,76 @@ export async function runAgentWithTools(
   const project = getProject();
   const openai = project.getOpenAIClient();
 
-  // 1. Find the agent by name from the assistants list
-  let agentId: string | null = null;
-  for await (const assistant of openai.beta.assistants.list()) {
-    if (assistant.name === agentName) {
-      agentId = assistant.id;
-      break;
-    }
-  }
-  if (!agentId) {
-    throw new Error(
-      `Agent '${agentName}' not found. Check the agent name in Foundry and AZURE_AI_BUILDER_AGENT_ID.`
-    );
-  }
+  // Try Assistants/Threads API first (activates agent tools)
+  try {
+    // Use agent name directly as the assistant_id (Foundry convention)
+    const stream = openai.beta.threads.createAndRunStream({
+      assistant_id: agentName,
+      thread: {
+        messages: [{ role: 'user', content: userPrompt }],
+      },
+    });
 
-  // 2. Create a thread with the user message and stream the run
-  const stream = openai.beta.threads.createAndRunStream({
-    assistant_id: agentId,
-    thread: {
-      messages: [{ role: 'user', content: userPrompt }],
-    },
-  });
+    let fullText = '';
+    let threadId = '';
+    let runId = '';
 
-  let fullText = '';
-  let threadId = '';
-  let runId = '';
-
-  for await (const event of stream) {
-    // Extract IDs from run events
-    if (event.event === 'thread.run.created') {
-      threadId = event.data.thread_id;
-      runId = event.data.id;
-    }
-    // Capture text deltas
-    if (event.event === 'thread.message.delta') {
-      const delta = event.data.delta;
-      if (delta?.content) {
-        for (const block of delta.content) {
-          if (block.type === 'text' && block.text?.value) {
-            fullText += block.text.value;
-            onDelta(block.text.value);
+    for await (const event of stream) {
+      if (event.event === 'thread.run.created') {
+        threadId = event.data.thread_id;
+        runId = event.data.id;
+      }
+      if (event.event === 'thread.message.delta') {
+        const delta = event.data.delta;
+        if (delta?.content) {
+          for (const block of delta.content) {
+            if (block.type === 'text' && block.text?.value) {
+              fullText += block.text.value;
+              onDelta(block.text.value);
+            }
           }
         }
       }
     }
-  }
 
-  return { outputText: fullText, threadId, runId };
+    return { outputText: fullText, threadId, runId };
+  } catch (err: unknown) {
+    const status = (err as any)?.status ?? (err as any)?.code;
+    console.log(
+      `[foundryAgent] Assistants API failed (status=${status}), falling back to Responses API streaming`
+    );
+
+    // Fallback: use Responses API with streaming + agent_reference
+    const conversation = await openai.conversations.create({
+      items: [{ type: 'message', role: 'user', content: userPrompt }],
+    });
+
+    const stream = await openai.responses.create({
+      conversation: conversation.id,
+      agent_reference: { name: agentName, type: 'agent_reference' },
+      stream: true,
+    } as any);
+
+    let fullText = '';
+    let responseId = '';
+
+    for await (const event of stream) {
+      if (event.type === 'response.output_text.delta') {
+        const delta = (event as any).delta ?? '';
+        fullText += delta;
+        onDelta(delta);
+      }
+      if (event.type === 'response.completed') {
+        responseId = (event as any).response?.id ?? '';
+      }
+    }
+
+    return {
+      outputText: fullText,
+      threadId: conversation.id,
+      runId: responseId,
+    };
+  }
 }
 
 /**
