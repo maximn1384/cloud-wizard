@@ -26,7 +26,7 @@ You MUST respond with ONLY a valid JSON object. No markdown fences, no explanati
         "method": "tools/call",
         "params": {
           "name": "describe_table",
-          "arguments": { "table_name": "account" }
+          "arguments": { "tablename": "account" }
         }
       }
     },
@@ -39,7 +39,7 @@ You MUST respond with ONLY a valid JSON object. No markdown fences, no explanati
         "params": {
           "name": "update_table",
           "arguments": {
-            "table_name": "account",
+            "tablename": "account",
             "columns": [{ "name": "mig_sourceclientid", "type": "string", "description": "Source Client ID" }]
           }
         }
@@ -49,6 +49,29 @@ You MUST respond with ONLY a valid JSON object. No markdown fences, no explanati
   ],
   "summary": "Deploy 3 entities with 15 custom fields and 2 relationships"
 }
+
+## CRITICAL: MCP Parameter Names
+The Dataverse MCP endpoint uses these EXACT parameter names:
+- list_tables: \`{}\` or \`{ "scope": "..." }\`
+- describe_table: \`{ "tablename": "account" }\`
+- update_table: \`{ "tablename": "account", "item": "[{\\"name\\":\\"Source Client ID\\",\\"type\\":\\"String\\",\\"required\\":true}]" }\`
+  - "item" is a STRING containing a JSON array of columns. Valid types: choice, multiselect, customer, multiline text, duration, time zone, language, phone, email, url, lookup, money, string, integer, decimal, boolean, datetime, double, text area, ticker symbol, rich text, file, image.
+  - For choice fields add "choices": [{"label":"...", "value": 100000000}]
+  - For lookup fields add "relatedtable": "target entity logical name"
+  - Column names should NOT include publisher prefixes (the system adds them)
+  - You CAN include multiple columns in one call: "[{\\"name\\":\\"Field1\\",\\"type\\":\\"String\\"}, {\\"name\\":\\"Field2\\",\\"type\\":\\"Integer\\"}]"
+- create_table: \`{ "tablename": "customentity", "displayname": "Custom Entity", "item": "[{\\"name\\":\\"Field1\\",\\"type\\":\\"String\\"}]" }\`
+  - Same "item" string format as update_table. DO NOT include publisher prefixes in tablename.
+- create_record: \`{ "tablename": "account", "item": { "name": "Contoso", "accountnumber": "C001" } }\`
+  - Uses "item" (object) for the record data
+- update_record: \`{ "tablename": "account", "recordId": "guid", "item": { "name": "Updated" } }\`
+- read_query: \`{ "querytext": "SELECT TOP 5 name FROM account" }\`
+  - Uses "querytext" (NOT "query")
+- delete_table: \`{ "tablename": "...", "hasUserApproved": true }\`
+- delete_record: \`{ "tablename": "...", "recordId": "guid", "hasUserApproved": true }\`
+- list_apps: \`{}\`
+
+ALWAYS use "tablename" (one word). ALWAYS use "item" for columns/data. ALWAYS use "querytext" for queries.
 
 ## Planning Rules
 
