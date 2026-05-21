@@ -167,6 +167,7 @@ export function GenerateStep() {
 
     const controller = api.generateStream(
       runId,
+      run?.environment.url ?? '',
       (delta) => {
         setStreamText((prev) => prev + delta);
       },

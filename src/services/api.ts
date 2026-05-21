@@ -81,19 +81,25 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approvedBy }) }
     ),
 
-  // Generation (Builder agent — SSE streaming)
+  // Generation (Builder agent — SSE streaming with MCP execution)
   generateStream: (
     runId: string,
+    orgUrl: string,
     onDelta: (text: string) => void,
     onDone: () => void,
     onError: (error: string) => void
   ) => {
     const controller = new AbortController();
-    fetch(`${API_BASE}/ai/generate/${runId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-    })
+    // Get Dataverse token for MCP calls, then start the stream
+    acquireDataverseToken(orgUrl).then((token) => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      fetch(`${API_BASE}/ai/generate/${runId}`, {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+      })
       .then(async (res) => {
         if (!res.ok) {
           const body = await res.text();
@@ -131,6 +137,7 @@ export const api = {
           onError(err instanceof Error ? err.message : 'Stream failed');
         }
       });
+    });
     return controller;
   },
 

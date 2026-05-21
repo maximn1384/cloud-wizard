@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { runStorage } from '../services/runStorage';
 import { runAnalystAgent, runFoundryAgent, runFoundryAgentStream, runAgentWithTools } from '../services/foundryAgent';
+import { DataverseMcpClient } from '../services/dataverseMcp';
 import type { RunVersion } from '../../src/types/run';
 
 export const aiRouter = Router();
@@ -217,12 +218,12 @@ aiRouter.post('/design/:runId', async (req, res) => {
 });
 
 /**
- * Run the Solution-Builder agent to execute the approved design in D365.
- * Streams the agent's output via Server-Sent Events (SSE) so the frontend
- * can show real-time deployment progress.
+ * Run the Solution-Builder agent to produce a plan, then execute it via Dataverse MCP.
+ * Flow: Agent produces JSON plan → App executes each step via MCP → streams progress via SSE.
  */
 aiRouter.post('/generate/:runId', async (req, res) => {
   const { runId } = req.params;
+  const token = req.headers.authorization?.replace('Bearer ', '') ?? '';
 
   const run = runStorage.get(runId);
   if (!run) {
@@ -265,19 +266,9 @@ aiRouter.post('/generate/:runId', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  runStorage.addLog(runId, {
-    id: uuidv4(),
-    runId,
-    timestamp: new Date().toISOString(),
-    level: 'info',
-    category: 'ai',
-    message: 'Starting Solution-Builder generation (streaming)',
-    details: {
-      versionId: currentVersion.id,
-      environmentUrl,
-      designAgent: currentVersion.solutionDesign.agentName,
-    },
-  });
+  const sendDelta = (text: string) => {
+    res.write(`data: ${JSON.stringify({ type: 'delta', text })}\n\n`);
+  };
 
   run.status = 'generating';
   run.updatedAt = new Date().toISOString();
@@ -287,42 +278,79 @@ aiRouter.post('/generate/:runId', async (req, res) => {
     const agentName =
       process.env.AZURE_AI_BUILDER_AGENT_ID ?? 'Solution-Builder';
 
-    const generatePrompt = [
-      'You are receiving an approved solution design for a Dynamics 365 migration.',
-      'Execute this design in the target Dataverse environment using your MCP tools.',
+    // Step 1: Get execution plan from agent
+    sendDelta('## Phase 1: Planning\n\nAsking Solution-Builder to create an execution plan...\n\n');
+
+    const planPrompt = [
+      'Produce a JSON execution plan for the following approved solution design.',
       '',
-      `**Target Environment:** ${environmentUrl}`,
-      '',
-      'Follow your system instructions:',
-      '1. Inspect the environment first (list_tables, describe_table)',
-      '2. Deploy schema changes (create/update tables and columns)',
-      '3. Create relationships',
-      '4. Migrate data if specified',
-      '5. Verify all changes',
-      '',
-      'Produce a complete deployment report.',
+      `Target Environment: ${environmentUrl}`,
       '',
       '--- APPROVED SOLUTION DESIGN ---',
-      '```markdown',
       currentVersion.solutionDesign.markdown,
-      '```',
     ].join('\n');
 
-    const result = await runAgentWithTools(
-      agentName,
-      generatePrompt,
-      (delta) => {
-        // Send each text chunk as an SSE event
-        res.write(`data: ${JSON.stringify({ type: 'delta', text: delta })}\n\n`);
-      }
-    );
+    const planResult = await runFoundryAgent(agentName, planPrompt);
 
-    // Store the generation result on the current version
+    // Parse the JSON plan from the agent's response
+    let plan: { plan: Array<{ step: number; action: string; description: string; mcpCall: { method: string; params: Record<string, unknown> }; dependsOn?: number }>; summary: string };
+    try {
+      // Extract JSON from the response (agent might wrap it in markdown fences)
+      let jsonStr = planResult.outputText.trim();
+      const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) jsonStr = jsonMatch[1].trim();
+      plan = JSON.parse(jsonStr);
+    } catch {
+      sendDelta(`**Error:** Could not parse execution plan from agent.\n\nRaw response:\n${planResult.outputText.substring(0, 1000)}\n`);
+      res.write(`data: ${JSON.stringify({ type: 'error', error: 'Failed to parse execution plan' })}\n\n`);
+      res.end();
+      return;
+    }
+
+    sendDelta(`**Plan received:** ${plan.summary}\n\n`);
+    sendDelta(`| Step | Action | Description | Status |\n|------|--------|-------------|--------|\n`);
+
+    // Step 2: Execute each step via Dataverse MCP
+    const mcpClient = new DataverseMcpClient(environmentUrl, token);
+    const results: Array<{ step: number; action: string; success: boolean; details: string }> = [];
+
+    for (const step of plan.plan) {
+      sendDelta(`| ${step.step} | ${step.action} | ${step.description} | ⏳ Running... |\n`);
+
+      const mcpResult = await mcpClient.call(
+        step.mcpCall.method,
+        step.mcpCall.params
+      );
+
+      if (mcpResult.success) {
+        const summary = typeof mcpResult.data === 'string'
+          ? mcpResult.data.substring(0, 100)
+          : JSON.stringify(mcpResult.data).substring(0, 100);
+        results.push({ step: step.step, action: step.action, success: true, details: summary });
+        sendDelta(`\n> ✅ Step ${step.step}: ${step.description} — Success\n\n`);
+      } else {
+        results.push({ step: step.step, action: step.action, success: false, details: mcpResult.error ?? 'Unknown error' });
+        sendDelta(`\n> ⚠️ Step ${step.step}: ${step.description} — ${mcpResult.error}\n\n`);
+      }
+    }
+
+    // Step 3: Summary
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+    const summaryText = `\n## Deployment Complete\n\n- **Steps executed:** ${results.length}\n- **Succeeded:** ${succeeded}\n- **Failed:** ${failed}\n- **Environment:** ${environmentUrl}\n`;
+    sendDelta(summaryText);
+
+    // Store result
+    const fullReport = plan.plan.map((s, i) => {
+      const r = results[i];
+      return `${r?.success ? '✅' : '⚠️'} Step ${s.step}: ${s.description} — ${r?.success ? 'OK' : r?.details}`;
+    }).join('\n');
+
     (currentVersion as any).generationResult = {
-      markdown: result.outputText,
+      markdown: `${plan.summary}\n\n${fullReport}\n\n${summaryText}`,
       agentName,
-      conversationId: result.threadId,
-      responseId: result.runId,
+      conversationId: planResult.conversationId,
+      responseId: planResult.responseId,
       generatedAt: new Date().toISOString(),
       environmentUrl,
     };
@@ -331,40 +359,13 @@ aiRouter.post('/generate/:runId', async (req, res) => {
     run.updatedAt = new Date().toISOString();
     runStorage.save(run);
 
-    runStorage.addLog(runId, {
-      id: uuidv4(),
-      runId,
-      timestamp: new Date().toISOString(),
-      level: 'info',
-      category: 'ai',
-      message: `Generation completed (${result.outputText.length} chars)`,
-      details: {
-        versionId: currentVersion.id,
-        conversationId: result.conversationId,
-      },
-    });
-
-    // Send completion event with full version data
     res.write(`data: ${JSON.stringify({ type: 'done', version: currentVersion })}\n\n`);
     res.end();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-
     run.status = 'error';
     run.updatedAt = new Date().toISOString();
     runStorage.save(run);
-
-    runStorage.addLog(runId, {
-      id: uuidv4(),
-      runId,
-      timestamp: new Date().toISOString(),
-      level: 'error',
-      category: 'ai',
-      message: 'Generation failed',
-      details: { error: message },
-    });
-
-    // Send error as SSE event and close
     res.write(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`);
     res.end();
   }
