@@ -5,6 +5,7 @@ import { runsRouter } from './routes/runs';
 import { uploadRouter } from './routes/upload';
 import { aiRouter } from './routes/ai';
 import { mcpRouter } from './routes/mcp';
+import { agentCallbackRouter } from './routes/agentCallback';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -24,6 +25,9 @@ app.use('/api/runs', runsRouter);
 app.use('/api/upload', uploadRouter);
 app.use('/api/ai', aiRouter);
 app.use('/api/mcp', mcpRouter);
+
+// Agent Activity Protocol callback (Bot Framework reply endpoint)
+app.use('/api/agent-callback', agentCallbackRouter);
 
 // Health check
 app.get('/api/health', (_req, res) => {

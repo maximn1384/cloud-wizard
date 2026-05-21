@@ -1,5 +1,6 @@
 import { AIProjectClient } from '@azure/ai-projects';
 import { DefaultAzureCredential } from '@azure/identity';
+import { EventEmitter } from 'events';
 import type { SourceFile, SourceTable } from '../../src/types/run';
 
 let cachedClient: AIProjectClient | null = null;
@@ -142,11 +143,15 @@ export async function runFoundryAgentStream(
  * Run a Foundry agent via its native Activity Protocol endpoint.
  * This properly activates the agent's configured tools (MCP, etc.)
  *
- * The endpoint URL pattern:
- *   {project-endpoint}/agents/{agentName}/endpoint/protocols/activityprotocol
+ * Flow:
+ *   1. Send activity to the agent's Activity Protocol endpoint
+ *   2. Agent processes async (calls MCP tools, reasons, etc.)
+ *   3. Agent sends reply activities to our callback webhook (serviceUrl)
+ *   4. We capture replies and stream text deltas to the caller
  *
- * Auth: Bearer token from DefaultAzureCredential scoped to the Foundry endpoint.
- * Streams the response and yields text deltas for real-time UI updates.
+ * Requires:
+ *   - NGROK_URL env var (public URL pointing to our Express server)
+ *   - The agent-callback route mounted at /api/agent-callback
  */
 export async function runAgentWithTools(
   agentName: string,
@@ -158,25 +163,45 @@ export async function runAgentWithTools(
     throw new Error('AZURE_AI_PROJECT_ENDPOINT not configured.');
   }
 
-  // Build the Activity Protocol endpoint URL
-  const agentUrl = `${projectEndpoint}/agents/${agentName}/endpoint/protocols/activityprotocol`;
-
-  // Get a Bearer token scoped to the Foundry endpoint
-  const credential = getCredential();
-  // Try cognitive services scope first, then the endpoint-specific scope
-  const scopes = ['https://cognitiveservices.azure.com/.default'];
-  const tokenResponse = await credential.getToken(scopes);
-  if (!tokenResponse?.token) {
-    throw new Error('Failed to acquire access token for Foundry endpoint.');
+  const ngrokUrl = process.env.NGROK_URL;
+  if (!ngrokUrl) {
+    throw new Error(
+      'NGROK_URL not configured. Run: ngrok http 3001 and set NGROK_URL in .env'
+    );
   }
 
-  console.log(`[foundryAgent] Calling Activity Protocol: ${agentUrl}`);
+  const agentUrl = `${projectEndpoint}/agents/${agentName}/endpoint/protocols/activityprotocol?api-version=2025-05-15-preview`;
+  const serviceUrl = `${ngrokUrl}/api/agent-callback`;
 
-  // Activity Protocol request — Bot Framework-style activity
+  // Get Bearer token
+  const credential = getCredential();
+  const tokenResponse = await credential.getToken('https://ai.azure.com/.default');
+  if (!tokenResponse?.token) {
+    throw new Error('Failed to acquire access token.');
+  }
+
+  const conversationId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // Register an event emitter to receive replies
+  const { pendingReplies } = await import('../routes/agentCallback');
+  const emitter = new EventEmitter();
+  pendingReplies.set(conversationId, emitter);
+
+  console.log(`[foundryAgent] Activity Protocol: ${agentUrl}`);
+  console.log(`[foundryAgent] Callback: ${serviceUrl}`);
+  console.log(`[foundryAgent] ConversationId: ${conversationId}`);
+
+  // Send the activity (Bot Framework Activity Protocol format)
   const activity = {
     type: 'message',
+    id: `msg-${Date.now()}`,
+    timestamp: new Date().toISOString(),
     text: userPrompt,
-    from: { id: 'cloud-wizard-app' },
+    channelId: 'directline',
+    from: { id: 'cloud-wizard', name: 'Cloud Wizard App' },
+    recipient: { id: agentName, name: agentName },
+    conversation: { id: conversationId },
+    serviceUrl,
   };
 
   const response = await fetch(agentUrl, {
@@ -184,86 +209,48 @@ export async function runAgentWithTools(
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${tokenResponse.token}`,
+      'foundry-features': 'HostedAgents=V1Preview,AgentEndpoints=V1Preview',
     },
     body: JSON.stringify(activity),
   });
 
-  if (!response.ok) {
+  if (!response.ok && response.status !== 202) {
     const errorBody = await response.text().catch(() => '');
-    console.error(
-      `[foundryAgent] Activity Protocol error: ${response.status} ${errorBody}`
-    );
-    throw new Error(
-      `Agent API ${response.status}: ${errorBody || response.statusText}`
-    );
+    pendingReplies.delete(conversationId);
+    throw new Error(`Agent API ${response.status}: ${errorBody || response.statusText}`);
   }
 
-  // Check if the response is streamed (SSE / chunked) or a single JSON response
-  const contentType = response.headers.get('content-type') ?? '';
+  console.log(`[foundryAgent] Activity accepted (${response.status}). Waiting for reply...`);
 
-  if (contentType.includes('text/event-stream') || contentType.includes('ndjson')) {
-    // Streaming response — parse SSE or newline-delimited JSON
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No response body from agent');
-
-    const decoder = new TextDecoder();
+  // Wait for the agent to send replies to our callback
+  return new Promise((resolve, reject) => {
     let fullText = '';
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
-
-        // Handle SSE format (data: {...})
-        const jsonStr = trimmed.startsWith('data: ')
-          ? trimmed.slice(6)
-          : trimmed;
-
-        try {
-          const event = JSON.parse(jsonStr);
-          // Extract text from various possible formats
-          const text =
-            event.text ??
-            event.delta?.text ??
-            event.delta?.content ??
-            event.choices?.[0]?.delta?.content ??
-            '';
-          if (text) {
-            fullText += text;
-            onDelta(text);
-          }
-        } catch {
-          // Not JSON — might be raw text
-          if (trimmed && !trimmed.startsWith('event:') && !trimmed.startsWith(':')) {
-            fullText += trimmed;
-            onDelta(trimmed);
-          }
-        }
+    const timeout = setTimeout(() => {
+      pendingReplies.delete(conversationId);
+      if (fullText) {
+        resolve({ outputText: fullText, threadId: conversationId, runId: '' });
+      } else {
+        reject(new Error('Agent did not reply within 5 minutes.'));
       }
-    }
+    }, 5 * 60 * 1000);
 
-    return { outputText: fullText, threadId: '', runId: '' };
-  } else {
-    // Single JSON response
-    const body = await response.json();
-    const text =
-      body.text ??
-      body.reply ??
-      body.activities?.[0]?.text ??
-      body.output_text ??
-      JSON.stringify(body, null, 2);
+    emitter.on('text', (text: string) => {
+      fullText += text + '\n';
+      onDelta(text);
+    });
 
-    onDelta(text);
-    return { outputText: text, threadId: '', runId: '' };
-  }
+    emitter.on('done', () => {
+      clearTimeout(timeout);
+      pendingReplies.delete(conversationId);
+      resolve({ outputText: fullText, threadId: conversationId, runId: '' });
+    });
+
+    emitter.on('error', (err: Error) => {
+      clearTimeout(timeout);
+      pendingReplies.delete(conversationId);
+      reject(err);
+    });
+  });
 }
 
 /**
