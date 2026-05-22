@@ -88,15 +88,70 @@ export interface RequirementsDraft {
 /**
  * Solution design produced by the Solution-Architect agent.
  * Transforms requirements into D365-aligned schema and deployment specifications.
+ * Now includes a deployment backlog for incremental execution.
  */
 export interface SolutionDesign {
   markdown: string;
+  backlog: BacklogItem[];
   agentName: string;
   conversationId: string;
   responseId: string;
   generatedAt: string;
   userGuidance?: string;
 }
+
+/**
+ * A discrete deployment task in the migration backlog.
+ * Can be executed individually or bundled with other items.
+ */
+export interface BacklogItem {
+  id: string;
+  category: BacklogCategory;
+  name: string;
+  description: string;
+  deploymentMethod: 'mcp' | 'webapi' | 'manual';
+  priority: number;
+  dependencies: string[];
+  status: BacklogItemStatus;
+
+  // Execution details (from agent)
+  mcpCalls?: Array<{
+    method: string;
+    params: Record<string, unknown>;
+  }>;
+  manualInstructions?: string;
+
+  // User input (editable before execution)
+  userNotes?: string;
+  userApproved: boolean;
+
+  // Results (after execution)
+  result?: {
+    completedAt: string;
+    success: boolean;
+    details: string;
+    error?: string;
+  };
+}
+
+export type BacklogCategory =
+  | 'solution'
+  | 'schema'
+  | 'data'
+  | 'forms'
+  | 'business-rules'
+  | 'security'
+  | 'sla'
+  | 'navigation'
+  | 'validation';
+
+export type BacklogItemStatus =
+  | 'pending'
+  | 'ready'
+  | 'in-progress'
+  | 'completed'
+  | 'failed'
+  | 'skipped';
 
 export interface AnalysisResult {
   recommendedSchema: DataverseSchemaProposal;

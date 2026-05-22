@@ -160,6 +160,25 @@ aiRouter.post('/design/:runId', async (req, res) => {
 
     const result = await runFoundryAgent(agentName, designPrompt);
 
+    // Parse backlog from the agent's response (wrapped in ```deployment-backlog fence)
+    let markdown = result.outputText;
+    let backlog: import('../../src/types/run').BacklogItem[] = [];
+    const backlogMatch = markdown.match(/```deployment-backlog\s*([\s\S]*?)```/);
+    if (backlogMatch) {
+      try {
+        backlog = JSON.parse(backlogMatch[1].trim()).map((item: any) => ({
+          ...item,
+          status: 'pending',
+          userApproved: false,
+        }));
+        // Remove the backlog fence from the markdown
+        markdown = markdown.replace(/```deployment-backlog[\s\S]*?```/, '').trim();
+      } catch (e) {
+        console.error('[design] Failed to parse deployment backlog:', e);
+      }
+    }
+    console.log(`[design] Backlog items: ${backlog.length}`);
+
     const versionNumber = run.versions.length + 1;
     const newVersion: RunVersion = {
       id: uuidv4(),
@@ -169,7 +188,8 @@ aiRouter.post('/design/:runId', async (req, res) => {
       analysis: null,
       requirementsDraft: currentVersion.requirementsDraft,
       solutionDesign: {
-        markdown: result.outputText,
+        markdown,
+        backlog,
         agentName,
         conversationId: result.conversationId,
         responseId: result.responseId,
@@ -442,4 +462,157 @@ aiRouter.post('/generate-test', async (req, res) => {
     res.write(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`);
     res.end();
   }
+});
+
+/**
+ * Deploy selected backlog items incrementally.
+ * For each MCP item: asks Solution-Builder for plan refinement → executes via MCP.
+ * For manual items: returns instructions without executing.
+ * Streams progress via SSE.
+ */
+aiRouter.post('/deploy-items/:runId', async (req, res) => {
+  const { runId } = req.params;
+  const { itemIds, userNotes } = req.body as {
+    itemIds: string[];
+    userNotes?: Record<string, string>;
+  };
+  const token = req.headers.authorization?.replace('Bearer ', '') ?? '';
+
+  const run = runStorage.get(runId);
+  if (!run) { res.status(404).json({ error: 'Run not found' }); return; }
+
+  const currentVersion = run.versions.find((v) => v.id === run.currentVersionId);
+  if (!currentVersion?.solutionDesign) {
+    res.status(400).json({ error: 'No solution design found.' });
+    return;
+  }
+
+  const backlog = currentVersion.solutionDesign.backlog ?? [];
+  const selectedItems = backlog.filter((item) => itemIds.includes(item.id));
+
+  if (selectedItems.length === 0) {
+    res.status(400).json({ error: 'No matching backlog items found.' });
+    return;
+  }
+
+  const environmentUrl = run.environment.url;
+  if (!environmentUrl) {
+    res.status(400).json({ error: 'No environment URL configured.' });
+    return;
+  }
+
+  // SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const sendEvent = (data: Record<string, unknown>) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Sort by priority, respect dependencies
+  const sorted = selectedItems.sort((a, b) => a.priority - b.priority);
+  const mcpClient = new DataverseMcpClient(environmentUrl, token);
+
+  for (const item of sorted) {
+    // Apply user notes if provided
+    if (userNotes?.[item.id]) {
+      item.userNotes = userNotes[item.id];
+    }
+
+    // Check dependencies
+    const unmetDeps = item.dependencies.filter((depId) => {
+      const dep = backlog.find((b) => b.id === depId);
+      return dep && dep.status !== 'completed';
+    });
+    if (unmetDeps.length > 0) {
+      item.status = 'pending';
+      sendEvent({ type: 'item-status', itemId: item.id, status: 'pending', message: `Waiting for: ${unmetDeps.join(', ')}` });
+      continue;
+    }
+
+    if (item.deploymentMethod === 'manual') {
+      item.status = 'skipped';
+      sendEvent({
+        type: 'item-status',
+        itemId: item.id,
+        status: 'skipped',
+        message: item.manualInstructions ?? 'Manual configuration required.',
+      });
+      continue;
+    }
+
+    // MCP execution
+    item.status = 'in-progress';
+    sendEvent({ type: 'item-status', itemId: item.id, status: 'in-progress', message: `Deploying: ${item.name}` });
+
+    const mcpCalls = item.mcpCalls ?? [];
+    if (mcpCalls.length === 0) {
+      // Ask Solution-Builder for execution plan for this item
+      try {
+        const agentName = process.env.AZURE_AI_BUILDER_AGENT_ID ?? 'Solution-Builder';
+        const itemPrompt = [
+          `Produce a JSON execution plan for this single backlog item:`,
+          `Item: ${item.name}`,
+          `Description: ${item.description}`,
+          `Category: ${item.category}`,
+          item.userNotes ? `User notes: ${item.userNotes}` : '',
+          `Target Environment: ${environmentUrl}`,
+        ].join('\n');
+        const planResult = await runFoundryAgent(agentName, itemPrompt);
+        let jsonStr = planResult.outputText.trim();
+        const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (jsonMatch) jsonStr = jsonMatch[1].trim();
+        const plan = JSON.parse(jsonStr);
+        for (const step of plan.plan ?? []) {
+          mcpCalls.push(step.mcpCall);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        item.status = 'failed';
+        item.result = { completedAt: new Date().toISOString(), success: false, details: '', error: `Plan generation failed: ${msg}` };
+        sendEvent({ type: 'item-status', itemId: item.id, status: 'failed', message: item.result.error });
+        continue;
+      }
+    }
+
+    // Execute MCP calls
+    let allSuccess = true;
+    const details: string[] = [];
+
+    for (const call of mcpCalls) {
+      const mcpResult = await mcpClient.call(call.method, call.params);
+      const resultText = mcpResult.success
+        ? (typeof mcpResult.data === 'string' ? mcpResult.data : JSON.stringify(mcpResult.data)).substring(0, 200)
+        : mcpResult.error ?? 'Unknown error';
+
+      if (mcpResult.success) {
+        details.push(`✅ ${call.params?.name ?? call.method}: ${resultText}`);
+        sendEvent({ type: 'item-progress', itemId: item.id, message: `✅ ${call.params?.name ?? call.method}` });
+      } else {
+        allSuccess = false;
+        details.push(`⚠️ ${call.params?.name ?? call.method}: ${resultText}`);
+        sendEvent({ type: 'item-progress', itemId: item.id, message: `⚠️ ${call.params?.name ?? call.method}: ${resultText}` });
+      }
+    }
+
+    item.status = allSuccess ? 'completed' : 'failed';
+    item.result = {
+      completedAt: new Date().toISOString(),
+      success: allSuccess,
+      details: details.join('\n'),
+      error: allSuccess ? undefined : details.filter((d) => d.startsWith('⚠️')).join('\n'),
+    };
+
+    sendEvent({ type: 'item-status', itemId: item.id, status: item.status, message: allSuccess ? 'Completed' : 'Completed with errors' });
+  }
+
+  // Save updated backlog
+  run.updatedAt = new Date().toISOString();
+  runStorage.save(run);
+
+  sendEvent({ type: 'done', backlog });
+  res.end();
 });

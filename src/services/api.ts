@@ -81,6 +81,54 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ approvedBy }) }
     ),
 
+  // Deploy selected backlog items (SSE streaming)
+  deployItems: (
+    runId: string,
+    orgUrl: string,
+    itemIds: string[],
+    userNotes: Record<string, string>,
+    onEvent: (event: { type: string; itemId?: string; status?: string; message?: string; backlog?: unknown }) => void,
+    onError: (error: string) => void
+  ) => {
+    const controller = new AbortController();
+    acquireDataverseToken(orgUrl).then((token) => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      fetch(`${API_BASE}/ai/deploy-items/${runId}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ itemIds, userNotes }),
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            onError(`API ${res.status}: ${await res.text()}`);
+            return;
+          }
+          const reader = res.body?.getReader();
+          if (!reader) { onError('No stream'); return; }
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip */ }
+            }
+          }
+        })
+        .catch((err) => {
+          if (err.name !== 'AbortError') onError(err.message ?? 'Stream failed');
+        });
+    });
+    return controller;
+  },
+
   // Generation (Builder agent — SSE streaming with MCP execution)
   generateStream: (
     runId: string,
