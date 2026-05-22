@@ -104,7 +104,9 @@ Allow iterative design: user provides guidance → agent produces design → use
 Acceptance criteria:
 
 Solution-Architect agent produces MCP-ready design specifications. 
-Design is stored and versioned separately from requirements. 
+Solution-Architect agent produces a structured deployment backlog (JSON) alongside the design.
+Each backlog item specifies: category, deployment method (mcp/webapi/manual), priority, dependencies.
+Design and backlog are stored and versioned separately from requirements. 
 User can iterate design with guidance input. 
 Clear audit trail: which requirements version → which design version.
 
@@ -122,16 +124,24 @@ Generation is blocked unless an explicit approval exists for that exact version.
 Double-approval is prevented (idempotent). 
 
 
- Journey F: Generate Artifacts in Dynamics 365 (MCP Execution)
+ Journey F: Incremental Deployment via Backlog
 
-User triggers “Generate”. 
-System uses Dataverse/Dynamics MCP tools to: create a solution 
-apply schema changes (fields required; tables optional; relationships basic) 
-System produces a step-by-step execution log. 
+User sees the deployment backlog as an interactive checklist.
+Each item shows: category, name, deployment method (MCP/Manual), status, dependencies.
+User can provide additional notes/guidance per item (free text, editable before execution).
+User selects items individually (per-item Deploy button) OR bundles multiple items (checkboxes + Deploy Selected).
+For MCP items: app asks Solution-Builder agent for execution plan → executes via Dataverse MCP → reports result.
+For manual items: app shows instructions; user marks as done when complete.
+Deployment is incremental — user controls the pace, reviews results between items.
+Failed items can be retried with revised user notes.
 Acceptance criteria:
 
-Idempotent behavior: repeated “Generate” does not duplicate artifacts. 
-Failures are captured with actionable error details. 
+Individual and bundled deployment of backlog items.
+User notes per item are passed to the agent for plan refinement.
+Real-time progress streaming per item.
+Idempotent: repeated execution does not duplicate artifacts.
+Manual items tracked but not auto-executed.
+Failures captured with actionable error details per item.
 
 
  Journey G (Optional MVP Placeholder): Test on Sample Data

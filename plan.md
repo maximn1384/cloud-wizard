@@ -271,13 +271,12 @@ _Note: the original plan called for a fully-typed `AnalysisResult` (schema/mappi
 
 - Receives `RequirementsDraft` from Phase 4 (what we have) + user design input (how to implement in D365)
 - Calls `Solution-Architect` agent on Azure Foundry using same `agent_reference` pattern as Migration-Analyst
-- Solution-Architect produces a structured design document (markdown) with:
-  - Mapped D365 entities (native or custom)
-  - Field definitions (names, types, requirements)
-  - Relationships and hierarchies
-  - MCP deployment steps (hints for Phase 7 generation)
-  - Data transformation rules
-- Output stored as `SolutionDesign` on `RunVersion` (parallel to `RequirementsDraft`, separate timeline)
+- Solution-Architect produces **two outputs**:
+  1. **Design document** (markdown) — entity definitions, field specs, relationships, deployment details
+  2. **Deployment backlog** (JSON) — ordered list of discrete deployment tasks, each with category, method, and dependencies
+- The backlog transforms the design from a document into an actionable, incremental deployment plan
+- Each backlog item specifies HOW it will be deployed: MCP (automated), Web API (future), or Manual (user does it)
+- Output stored as `SolutionDesign` (markdown + backlog JSON) on `RunVersion`
 
 ### Tasks
 
@@ -292,12 +291,51 @@ _Note: the original plan called for a fully-typed `AnalysisResult` (schema/mappi
 ```ts
 interface SolutionDesign {
   markdown: string;          // D365 design specification
+  backlog: BacklogItem[];    // Deployment backlog (ordered tasks)
   agentName: string;         // 'Solution-Architect'
   conversationId: string;    // Foundry conversation id
   responseId: string;        // Foundry response id
   generatedAt: string;       // ISO timestamp
   userGuidance?: string;     // user design preferences from this iteration
 }
+
+interface BacklogItem {
+  id: string;                          // "BL-001"
+  category: BacklogCategory;           // "schema" | "data" | "forms" | etc.
+  name: string;                        // "Account custom fields"
+  description: string;                 // What and why
+  deploymentMethod: "mcp" | "webapi" | "manual";
+  priority: number;                    // Suggested execution order
+  dependencies: string[];              // IDs of items that must complete first
+  status: "pending" | "ready" | "in-progress" | "completed" | "failed" | "skipped";
+
+  // Execution details (populated by agent)
+  mcpCalls?: McpCall[];                // MCP steps for automated items
+  manualInstructions?: string;         // Instructions for manual items
+
+  // User input (editable per item before execution)
+  userNotes?: string;                  // Free text guidance, overrides
+  userApproved: boolean;               // Explicitly approved for execution
+
+  // Results (populated after execution)
+  result?: {
+    completedAt: string;
+    success: boolean;
+    details: string;
+    error?: string;
+  };
+}
+
+type BacklogCategory =
+  | "solution"        // Solution container
+  | "schema"          // Tables, columns, relationships
+  | "data"            // Record migration
+  | "forms"           // Forms and views
+  | "business-rules"  // Business rules, workflows
+  | "security"        // Roles, permissions, teams
+  | "sla"             // SLAs, queues, entitlements
+  | "navigation"      // Sitemap, app modules
+  | "validation"      // Post-deployment verification queries
 ```
 
 5.3 **Solution Design UI** (`src/components/wizard/SolutionDesignStep.tsx`)
@@ -362,83 +400,115 @@ interface SolutionDesign {
 
 ---
 
-## Phase 7: Artifact Generation via Solution-Builder Agent (Journey F) 🔄
+## Phase 7: Incremental Deployment via Backlog (Journey F) ✅
 
-**Goal:** Execute approved schema changes in target D365 environment using the Solution-Builder agent, which has Dataverse MCP tools attached and operates autonomously.
+**Goal:** Execute the deployment backlog incrementally — user selects items individually or in bundles, app executes via Dataverse native MCP or flags as manual.
 
 ### Architecture
 
-The Solution-Builder agent is the **third agent** in the pipeline:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Phase 5: Solution-Architect produces Design + Deployment Backlog│
+│  Backlog = ordered list of discrete tasks with method & deps     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│  Phase 7: Generate Step — Backlog Checklist UI                   │
+│                                                                  │
+│  ☑ BL-001 [schema]  Account custom fields     [Deploy] ✅       │
+│    💬 "Use mig_ prefix"                                         │
+│  ☑ BL-002 [schema]  Contact custom fields     [Deploy] ✅       │
+│  ☐ BL-003 [forms]   Case main form            🔧 Manual         │
+│    💬 "Put migration fields in separate tab"                     │
+│  ☐ BL-004 [data]    Migrate Account records   [Deploy]          │
+│                                                                  │
+│  [Deploy Selected]  [Deploy All Checked]                         │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+    ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
+    │ MCP items  │   │ WebAPI    │   │ Manual    │
+    │ via native │   │ items     │   │ items     │
+    │ Dataverse  │   │ (future)  │   │ (tracked) │
+    │ /api/mcp   │   │           │   │           │
+    └────────────┘   └───────────┘   └───────────┘
+```
+
+### Three-Agent Pipeline (as built)
 
 ```
-Migration-Analyst (requirements) → Solution-Architect (design) → [approval] → Solution-Builder (execution)
+Migration-Analyst (what we have) → Solution-Architect (design + backlog) → [approval] → Solution-Builder (execution plans per item)
 ```
 
-Unlike the previous agents which only reason, the Builder agent has **Dataverse MCP tools** attached in Foundry. It autonomously:
-- Inspects the target environment (what exists)
-- Creates/updates tables and columns
-- Creates relationships
-- Migrates data
-- Verifies changes
-- **Adapts mid-execution** if it encounters errors (e.g., column already exists → skip, table missing → create first)
-
-The app's role is **orchestrator** — it sends the approved design, receives the deployment report, and logs everything.
+- **Migration-Analyst**: Requirements draft from source data (Responses API)
+- **Solution-Architect**: Design document + deployment backlog (Responses API)
+- **Solution-Builder**: JSON execution plan per backlog item (Responses API, planner mode)
+- **App**: Executes MCP calls against `https://{org}.crm.dynamics.com/api/mcp` using user's MSAL token
 
 ### Implementation Notes (as built)
 
-- Agent (`Solution-Builder`) lives on Azure AI Foundry with Dataverse MCP tool attached
-- MCP tool uses `DataverseMCPServerId` parameter (set as variable for dynamic environments)
-- Remote MCP Server endpoint: `https://agent365.svc.cloud.microsoft/agents/servers/Dataverse/{environment-url}`
-- Auth: OAuth Identity Passthrough (Managed provider) → user's identity flows through to Dataverse
-- Backend calls the agent through the same `runFoundryAgent()` pattern as other agents
-- Environment URL passed in the prompt (from `run.environment.url`)
+- Dataverse MCP endpoint: `https://org.crm.dynamics.com/api/mcp` (JSON-RPC over HTTPS)
+- Auth: User's MSAL Bearer token (app `2725938e-...` + Azure CLI `04b07795-...` in MCP Allowed Clients)
+- MCP parameter conventions: `tablename` (not table_name), `item` (stringified JSON array for columns), `querytext` (for queries)
+- Solution-Builder agent (v19+) produces JSON execution plans; app executes step-by-step
+- Verified: 15 custom columns deployed across account, contact, incident tables via MCP
+
+### Deployment Method Matrix
+
+| Category | Method | Available Now? | Notes |
+|----------|--------|:--------------:|-------|
+| Schema: tables/columns | MCP | ✅ | `create_table`, `update_table` |
+| Schema: relationships | MCP | ✅ | `update_table` with lookup type |
+| Data migration | MCP | ✅ | `create_record`, `read_query` |
+| Queues | MCP | ✅ | `create_record` on `queue` table |
+| Validation queries | MCP | ✅ | `read_query` to verify |
+| Forms & Views | Web API | Future | `SystemForm` PATCH (FormXML) |
+| Business rules | Manual | — | Configure in maker portal |
+| Security roles | Manual | — | Configure in admin center |
+| SLA policies | Manual | — | Configure in CS admin |
+| Navigation/sitemap | Manual | — | Configure in app designer |
+| Solution packaging | Web API | Future | `solutions` POST |
 
 ### Tasks
 
-7.1 **Backend: Generation endpoint** (`server/routes/ai.ts`)
-- `POST /api/ai/generate/:runId` – triggers Solution-Builder agent
-- Validates: version exists, is approved, has solution design, has environment URL
-- Builds prompt with approved design + target environment URL
-- Agent executes autonomously using its MCP tools
-- Stores agent's deployment report as `GenerationResult` on current version
-- Sets run status to `completed` on success
-- Env vars: `AZURE_AI_BUILDER_AGENT_ID`
+7.1 **Backlog Checklist UI** (`src/components/wizard/GenerateStep.tsx`)
+- Display backlog items as an interactive checklist with status badges
+- Each item shows: category icon, name, description, deployment method badge (MCP/Manual), status
+- Checkbox for selecting items; individual [Deploy] button per item
+- [Deploy Selected] button for bundled execution
+- Collapsible user notes textarea per item (editable before deployment)
+- Real-time progress: streaming MCP output per item as it executes
+- Manual items show instructions text instead of Deploy button
+- Color coding: green (completed), red (failed), yellow (in-progress), grey (pending)
 
-7.2 **Generation output schema**
-```ts
-interface GenerationResult {
-  markdown: string;          // deployment report from Builder agent
-  agentName: string;         // 'Solution-Builder'
-  conversationId: string;    // Foundry conversation id
-  responseId: string;        // Foundry response id
-  generatedAt: string;       // ISO timestamp
-  environmentUrl: string;    // target D365 environment
-}
-```
+7.2 **Incremental execution endpoint** (`server/routes/ai.ts`)
+- `POST /api/ai/deploy-items/:runId` — executes selected backlog items
+- Body: `{ itemIds: string[], userNotes?: Record<string, string> }`
+- For each MCP item: asks Solution-Builder for execution plan → executes via MCP → stores result
+- For manual items: marks as "skipped" with manual instructions
+- Streams progress via SSE
+- Respects dependency order (items with unmet dependencies are deferred)
 
-7.3 **Generation UI** (`src/components/wizard/GenerateStep.tsx`)
-- Deployment target summary card (environment, design agent, approval info)
-- **Deploy to Environment** button (disabled until approved)
-- Spinner with progress message during agent execution
-- Deployment report rendered as markdown (tables, lists, code blocks)
-- Green "Deployment Complete" banner with environment URL
-- Re-deploy button for re-running on the same version
-- Navigation: Back to Approve → View Logs
+7.3 **Backlog generation in Solution-Architect agent**
+- Updated agent instructions to produce `{ design: "...", backlog: [...] }` JSON
+- Each backlog item includes category, deployment method, priority, dependencies
+- MCP items include pre-built mcpCalls; manual items include instructions
 
-7.4 **Agent system instructions** (configured in Foundry portal)
-- Inspect before modifying (describe_table before update_table)
-- Prefer native D365 tables (Account, Contact, Case, etc.)
-- Idempotent: skip existing artifacts, don't create duplicates
-- Handle errors gracefully: log, continue independent steps, summarize
-- Structured deployment report output (pre-inspection, execution log, verification)
+7.4 **Solution-Builder agent (planner mode, v19+)**
+- Receives individual backlog item + user notes
+- Returns JSON execution plan with correct MCP parameter format
+- `item` parameter = stringified JSON array: `'[{"name":"Field","type":"String"}]'`
+- `tablename` (no underscore), `querytext` for queries
 
 ### Deliverables
-- [x] Builder agent callable via `agent_reference` pattern
-- [x] Backend validates approval before generation
-- [x] Generation result stored on RunVersion
-- [x] Full deployment UI with progress and report rendering
-- [ ] Verify agent's MCP tool connectivity to Dataverse (needs live test)
-- [ ] Dynamic `DataverseMCPServerId` parameter passing at call time
+- [x] Solution-Builder agent produces JSON execution plans
+- [x] App executes MCP calls against Dataverse native endpoint
+- [x] 15 custom columns deployed successfully (account, contact, incident)
+- [ ] Backlog generation in Solution-Architect agent
+- [ ] Backlog checklist UI with individual/bundle execution
+- [ ] User notes per backlog item
+- [ ] Manual item tracking
 
 ---
 
@@ -573,8 +643,8 @@ interface GenerationResult {
 | **M1 – Foundation** ✅ | 1-2 | App shell, routing, run creation, env connection (Dataverse WhoAmI) |
 | **M2 – Data Intake** ✅ | 3 | Excel upload, parsing, source metadata review |
 | **M3 – AI Analysis** ✅ | 4 | Migration-Analyst agent, versioned requirements drafts, iterative feedback |
-| **M4 – Solution Design** 🔄 | 5 | Solution-Architect agent, D365 design specifications, user guidance loop |
+| **M4 – Solution Design** 🔄 | 5 | Solution-Architect agent, D365 design + deployment backlog, user guidance loop |
 | **M5 – Approval Gate** ✅ | 6 | Lightweight approval + confirmation before generation |
-| **M5b – Generation** 🔄 | 7 | Solution-Builder agent deploys approved design to D365 via MCP |
+| **M5b – Generation** ✅ | 7 | Incremental deployment via backlog, MCP execution verified (15 columns deployed) |
 | **M5 – MVP Complete** | 7-8 | End-to-end: upload → analyze → approve → generate in D365 |
 | **M6 – Hardened** | 9 | Error handling, security, polish |
