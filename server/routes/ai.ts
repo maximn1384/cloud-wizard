@@ -160,19 +160,33 @@ aiRouter.post('/design/:runId', async (req, res) => {
 
     const result = await runFoundryAgent(agentName, designPrompt);
 
-    // Parse backlog from the agent's response (wrapped in ```deployment-backlog fence)
+    // Parse backlog from the agent's response
+    // Try multiple formats: ```deployment-backlog fence, ```json fence with array, or raw JSON array
     let markdown = result.outputText;
     let backlog: import('../../src/types/run').BacklogItem[] = [];
-    const backlogMatch = markdown.match(/```deployment-backlog\s*([\s\S]*?)```/);
+
+    // Strategy 1: ```deployment-backlog fence
+    let backlogMatch = markdown.match(/```deployment-backlog\s*([\s\S]*?)```/);
+    // Strategy 2: any ```json fence containing a JSON array starting with [{"id":"BL-
+    if (!backlogMatch) {
+      backlogMatch = markdown.match(/```(?:json)?\s*(\[\s*\{[\s\S]*?"id"\s*:\s*"BL-[\s\S]*?\])\s*```/);
+    }
+    // Strategy 3: raw JSON array at the end of the response (after last heading)
+    if (!backlogMatch) {
+      const rawArrayMatch = markdown.match(/(\[\s*\{\s*"id"\s*:\s*"BL-[\s\S]*\])\s*$/);
+      if (rawArrayMatch) backlogMatch = rawArrayMatch;
+    }
+
     if (backlogMatch) {
       try {
-        backlog = JSON.parse(backlogMatch[1].trim()).map((item: any) => ({
+        const parsed = JSON.parse(backlogMatch[1] ?? backlogMatch[0]);
+        backlog = (Array.isArray(parsed) ? parsed : []).map((item: any) => ({
           ...item,
           status: 'pending',
           userApproved: false,
         }));
-        // Remove the backlog fence from the markdown
-        markdown = markdown.replace(/```deployment-backlog[\s\S]*?```/, '').trim();
+        // Remove the backlog from the markdown
+        markdown = markdown.replace(backlogMatch[0], '').trim();
       } catch (e) {
         console.error('[design] Failed to parse deployment backlog:', e);
       }
